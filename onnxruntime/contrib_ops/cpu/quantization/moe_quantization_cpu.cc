@@ -15,7 +15,7 @@ namespace onnxruntime {
 namespace contrib {
 
 #define REGISTER_KERNEL()                                                                  \
-  ONNX_OPERATOR_KERNEL_EX(QMoE, kMSDomain, 1, kCpuExecutionProvider,                      \
+  ONNX_OPERATOR_KERNEL_EX(QMoE, kMSDomain, 1, kCpuExecutionProvider,                       \
                           (*KernelDefBuilder::Create())                                    \
                               .MayInplace(0, 0)                                            \
                               .TypeConstraint("T", BuildKernelDefConstraints<MLFloat16>()) \
@@ -82,10 +82,10 @@ Status QMoE::QuantizedMoEImpl(OpKernelContext* context,
                               const Tensor* fc1_scales,
                               const Tensor* fc2_scales,
                               const Tensor* fc3_scales_optional) const {
-  // FC3 (gating) check - throw error if present
+  // FC3 (gating) check - throw error if present (CPU doesn't support FC3)
   if (fc3_experts_weights_optional != nullptr) {
     return ORT_MAKE_STATUS(ONNXRUNTIME, NOT_IMPLEMENTED,
-                          "FC3 gating is not yet implemented for CPU quantized MoE. Please use the CUDA version for gated experts or disable FC3 gating.");
+                           "FC3 gating is not yet implemented for CPU quantized MoE. Please use the CUDA execution provider for gated experts or disable FC3 gating.");
   }
 
   // Get thread pool
@@ -119,13 +119,13 @@ Status QMoE::QuantizedMoEImpl(OpKernelContext* context,
       moe_params.num_rows);
 
   // Allocate thread-local buffers
-  auto thread_fc1_buffers = IAllocator::MakeUniquePtr<float>(allocator, num_threads * moe_params.inter_size);
-  auto thread_fc2_buffers = IAllocator::MakeUniquePtr<float>(allocator, num_threads * moe_params.hidden_size);
-  auto thread_results = IAllocator::MakeUniquePtr<float>(allocator, num_threads * moe_params.num_rows * moe_params.hidden_size);
+  auto thread_fc1_buffers = IAllocator::MakeUniquePtr<float>(allocator, static_cast<size_t>(num_threads * moe_params.inter_size));
+  auto thread_fc2_buffers = IAllocator::MakeUniquePtr<float>(allocator, static_cast<size_t>(num_threads * moe_params.hidden_size));
+  auto thread_results = IAllocator::MakeUniquePtr<float>(allocator, static_cast<size_t>(num_threads * moe_params.num_rows * moe_params.hidden_size));
 
   // Initialize thread results to zero
   std::fill(thread_results.get(),
-           thread_results.get() + num_threads * moe_params.num_rows * moe_params.hidden_size, 0.0f);
+            thread_results.get() + static_cast<size_t>(num_threads * moe_params.num_rows * moe_params.hidden_size), 0.0f);
 
   // Helper function to convert MLFloat16 to float
   auto ToFloat = [](MLFloat16 value) { return static_cast<float>(value); };
@@ -145,7 +145,7 @@ Status QMoE::QuantizedMoEImpl(OpKernelContext* context,
       case ActivationType::Identity:
         return x;
       default:
-        return x; // Default to identity
+        return x;  // Default to identity
     }
   };
 
@@ -154,9 +154,9 @@ Status QMoE::QuantizedMoEImpl(OpKernelContext* context,
 
     // Pre-dequantize all expert weights once (shared across all threads)
     auto dequant_fc1_weights = IAllocator::MakeUniquePtr<float>(allocator,
-        moe_params.num_experts * moe_params.hidden_size * moe_params.inter_size);
+                                                                static_cast<size_t>(moe_params.num_experts * moe_params.hidden_size * moe_params.inter_size));
     auto dequant_fc2_weights = IAllocator::MakeUniquePtr<float>(allocator,
-        moe_params.num_experts * moe_params.inter_size * moe_params.hidden_size);
+                                                                static_cast<size_t>(moe_params.num_experts * moe_params.inter_size * moe_params.hidden_size));
 
     // Dequantize FC1 weights for all experts (Int4 unpacking)
     for (int64_t expert_idx = 0; expert_idx < moe_params.num_experts; ++expert_idx) {
@@ -167,15 +167,15 @@ Status QMoE::QuantizedMoEImpl(OpKernelContext* context,
       for (int64_t out_col = 0; out_col < moe_params.inter_size; ++out_col) {
         for (int64_t in_col = 0; in_col < moe_params.hidden_size; ++in_col) {
           // For Int4, two values are packed in each uint8
-          size_t linear_idx = out_col * moe_params.hidden_size + in_col;
+          size_t linear_idx = static_cast<size_t>(out_col * moe_params.hidden_size + in_col);
           size_t packed_idx = linear_idx / 2;
           uint8_t packed_value = fc1_expert_weights[packed_idx];
 
           uint8_t quantized_weight;
           if (linear_idx % 2 == 0) {
-            quantized_weight = packed_value & 0x0F; // Lower 4 bits
+            quantized_weight = packed_value & 0x0F;  // Lower 4 bits
           } else {
-            quantized_weight = (packed_value >> 4) & 0x0F; // Upper 4 bits
+            quantized_weight = (packed_value >> 4) & 0x0F;  // Upper 4 bits
           }
 
           // Dequantize from 4-bit to float (symmetric quantization, zero point = 8)
@@ -193,15 +193,15 @@ Status QMoE::QuantizedMoEImpl(OpKernelContext* context,
       for (int64_t out_col = 0; out_col < moe_params.hidden_size; ++out_col) {
         for (int64_t in_col = 0; in_col < moe_params.inter_size; ++in_col) {
           // For Int4, two values are packed in each uint8
-          size_t linear_idx = out_col * moe_params.inter_size + in_col;
+          size_t linear_idx = static_cast<size_t>(out_col * moe_params.inter_size + in_col);
           size_t packed_idx = linear_idx / 2;
           uint8_t packed_value = fc2_expert_weights[packed_idx];
 
           uint8_t quantized_weight;
           if (linear_idx % 2 == 0) {
-            quantized_weight = packed_value & 0x0F; // Lower 4 bits
+            quantized_weight = packed_value & 0x0F;  // Lower 4 bits
           } else {
-            quantized_weight = (packed_value >> 4) & 0x0F; // Upper 4 bits
+            quantized_weight = (packed_value >> 4) & 0x0F;  // Upper 4 bits
           }
 
           // Dequantize from 4-bit to float (symmetric quantization, zero point = 8)
@@ -223,7 +223,7 @@ Status QMoE::QuantizedMoEImpl(OpKernelContext* context,
         // Convert input from MLFloat16 to float for computation
         std::vector<float> token_input_float(moe_params.hidden_size);
         for (int64_t i = 0; i < moe_params.hidden_size; ++i) {
-          token_input_float[i] = ToFloat(token_input_typed[i]);
+          token_input_float[static_cast<size_t>(i)] = ToFloat(token_input_typed[i]);
         }
         const float* token_input = token_input_float.data();
 
@@ -232,7 +232,7 @@ Status QMoE::QuantizedMoEImpl(OpKernelContext* context,
         // Process all experts for this token
         for (int64_t expert_idx = 0; expert_idx < moe_params.num_experts; ++expert_idx) {
           float routing_weight = ToFloat(router_probs_data[token_idx * moe_params.num_experts + expert_idx]);
-          if (routing_weight <= 1e-6f) continue; // Skip experts with negligible routing weight
+          if (routing_weight <= 1e-6f) continue;  // Skip experts with negligible routing weight
 
           // FC1: input -> intermediate using pre-dequantized weights + MLAS SGEMM
           const float* fc1_expert_weights = dequant_fc1_weights.get() + expert_idx * moe_params.hidden_size * moe_params.inter_size;
@@ -249,7 +249,7 @@ Status QMoE::QuantizedMoEImpl(OpKernelContext* context,
           fc1_params.alpha = 1.0f;
           fc1_params.beta = 0.0f;
 
-          MlasGemm(CblasNoTrans, CblasNoTrans, 1, moe_params.inter_size, moe_params.hidden_size, fc1_params, nullptr);
+          MlasGemm(CblasNoTrans, CblasNoTrans, 1, static_cast<size_t>(moe_params.inter_size), static_cast<size_t>(moe_params.hidden_size), fc1_params, nullptr);
 
           // Add bias and apply activation
           for (int64_t i = 0; i < moe_params.inter_size; ++i) {
@@ -274,7 +274,7 @@ Status QMoE::QuantizedMoEImpl(OpKernelContext* context,
           fc2_params.alpha = 1.0f;
           fc2_params.beta = 0.0f;
 
-          MlasGemm(CblasNoTrans, CblasNoTrans, 1, moe_params.hidden_size, moe_params.inter_size, fc2_params, nullptr);
+          MlasGemm(CblasNoTrans, CblasNoTrans, 1, static_cast<size_t>(moe_params.hidden_size), static_cast<size_t>(moe_params.inter_size), fc2_params, nullptr);
 
           // Add bias, apply routing weight, and accumulate to final result
           for (int64_t i = 0; i < moe_params.hidden_size; ++i) {
@@ -285,18 +285,18 @@ Status QMoE::QuantizedMoEImpl(OpKernelContext* context,
           }
         }
       }
-    };    // Execute token processing in parallel across threads
+    };  // Execute token processing in parallel across threads
     concurrency::ThreadPool::TryParallelFor(thread_pool, moe_params.num_rows,
-                                           static_cast<double>(std::max<int64_t>(1, moe_params.num_rows / num_threads)),
-                                           process_token_range);
+                                            static_cast<double>(std::max<int64_t>(1, moe_params.num_rows / num_threads)),
+                                            process_token_range);
   } else {
     // UInt8 implementation with pre-dequantized weights and MLAS SGEMM
 
     // Pre-dequantize all expert weights once (shared across all threads)
     auto dequant_fc1_weights = IAllocator::MakeUniquePtr<float>(allocator,
-        moe_params.num_experts * moe_params.hidden_size * moe_params.inter_size);
+                                                                static_cast<size_t>(moe_params.num_experts * moe_params.hidden_size * moe_params.inter_size));
     auto dequant_fc2_weights = IAllocator::MakeUniquePtr<float>(allocator,
-        moe_params.num_experts * moe_params.inter_size * moe_params.hidden_size);
+                                                                static_cast<size_t>(moe_params.num_experts * moe_params.inter_size * moe_params.hidden_size));
 
     // Dequantize FC1 weights for all experts
     for (int64_t expert_idx = 0; expert_idx < moe_params.num_experts; ++expert_idx) {
@@ -306,7 +306,7 @@ Status QMoE::QuantizedMoEImpl(OpKernelContext* context,
 
       for (int64_t out_col = 0; out_col < moe_params.inter_size; ++out_col) {
         for (int64_t in_col = 0; in_col < moe_params.hidden_size; ++in_col) {
-          size_t weight_idx = out_col * moe_params.hidden_size + in_col;
+          size_t weight_idx = static_cast<size_t>(out_col * moe_params.hidden_size + in_col);
           uint8_t quantized_weight = fc1_expert_weights[weight_idx];
           // Symmetric quantization with zero point = 128
           dequant_fc1_expert[weight_idx] = (static_cast<float>(quantized_weight) - 128.0f) * fc1_expert_scales[out_col];
@@ -322,7 +322,7 @@ Status QMoE::QuantizedMoEImpl(OpKernelContext* context,
 
       for (int64_t out_col = 0; out_col < moe_params.hidden_size; ++out_col) {
         for (int64_t in_col = 0; in_col < moe_params.inter_size; ++in_col) {
-          size_t weight_idx = out_col * moe_params.inter_size + in_col;
+          size_t weight_idx = static_cast<size_t>(out_col * moe_params.inter_size + in_col);
           uint8_t quantized_weight = fc2_expert_weights[weight_idx];
           // Symmetric quantization with zero point = 128
           dequant_fc2_expert[weight_idx] = (static_cast<float>(quantized_weight) - 128.0f) * fc2_expert_scales[out_col];
@@ -343,7 +343,7 @@ Status QMoE::QuantizedMoEImpl(OpKernelContext* context,
         // Convert input from MLFloat16 to float for MLAS computation
         std::vector<float> token_input_float(moe_params.hidden_size);
         for (int64_t i = 0; i < moe_params.hidden_size; ++i) {
-          token_input_float[i] = ToFloat(token_input_typed[i]);
+          token_input_float[static_cast<size_t>(i)] = ToFloat(token_input_typed[i]);
         }
         const float* token_input = token_input_float.data();
 
@@ -352,7 +352,7 @@ Status QMoE::QuantizedMoEImpl(OpKernelContext* context,
         // Process all experts for this token
         for (int64_t expert_idx = 0; expert_idx < moe_params.num_experts; ++expert_idx) {
           float routing_weight = ToFloat(router_probs_data[token_idx * moe_params.num_experts + expert_idx]);
-          if (routing_weight <= 1e-6f) continue; // Skip experts with negligible routing weight
+          if (routing_weight <= 1e-6f) continue;  // Skip experts with negligible routing weight
 
           // FC1: input -> intermediate using pre-dequantized weights + MLAS SGEMM
           const float* fc1_expert_weights = dequant_fc1_weights.get() + expert_idx * moe_params.hidden_size * moe_params.inter_size;
@@ -369,7 +369,7 @@ Status QMoE::QuantizedMoEImpl(OpKernelContext* context,
           fc1_params.alpha = 1.0f;
           fc1_params.beta = 0.0f;
 
-          MlasGemm(CblasNoTrans, CblasNoTrans, 1, moe_params.inter_size, moe_params.hidden_size, fc1_params, nullptr);
+          MlasGemm(CblasNoTrans, CblasNoTrans, 1, static_cast<size_t>(moe_params.inter_size), static_cast<size_t>(moe_params.hidden_size), fc1_params, nullptr);
 
           // Add bias and apply activation
           for (int64_t i = 0; i < moe_params.inter_size; ++i) {
@@ -394,7 +394,7 @@ Status QMoE::QuantizedMoEImpl(OpKernelContext* context,
           fc2_params.alpha = 1.0f;
           fc2_params.beta = 0.0f;
 
-          MlasGemm(CblasNoTrans, CblasNoTrans, 1, moe_params.hidden_size, moe_params.inter_size, fc2_params, nullptr);
+          MlasGemm(CblasNoTrans, CblasNoTrans, 1, static_cast<size_t>(moe_params.hidden_size), static_cast<size_t>(moe_params.inter_size), fc2_params, nullptr);
 
           // Add bias, apply routing weight, and accumulate to final result
           for (int64_t i = 0; i < moe_params.hidden_size; ++i) {
@@ -409,8 +409,8 @@ Status QMoE::QuantizedMoEImpl(OpKernelContext* context,
 
     // Execute token processing in parallel across threads
     concurrency::ThreadPool::TryParallelFor(thread_pool, moe_params.num_rows,
-                                           static_cast<double>(std::max<int64_t>(1, moe_params.num_rows / num_threads)),
-                                           process_token_range);
+                                            static_cast<double>(std::max<int64_t>(1, moe_params.num_rows / num_threads)),
+                                            process_token_range);
   }
 
   // Main thread reduction: combine all thread-local results into final output
@@ -418,7 +418,7 @@ Status QMoE::QuantizedMoEImpl(OpKernelContext* context,
     const float* thread_local_results = thread_results.get() + thread_id * moe_params.num_rows * moe_params.hidden_size;
     for (int64_t token_idx = 0; token_idx < moe_params.num_rows; ++token_idx) {
       for (int64_t col = 0; col < moe_params.hidden_size; ++col) {
-        size_t idx = token_idx * moe_params.hidden_size + col;
+        size_t idx = static_cast<size_t>(token_idx * moe_params.hidden_size + col);
         output_data[idx] = FromFloat(ToFloat(output_data[idx]) + thread_local_results[idx]);
       }
     }

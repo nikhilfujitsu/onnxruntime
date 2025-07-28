@@ -17,9 +17,8 @@ static void RunMoETest(const std::vector<float>& input, const std::vector<float>
                        int num_experts, int hidden_size, int inter_size, std::string activation_type,
                        int normalize_routing_weights = 0, int top_k = 1, bool use_float16 = false) {
   constexpr int min_cuda_arch = 700;
-  constexpr int max_cuda_arch = 900;
 
-  bool enable_cuda = HasCudaEnvironment(min_cuda_arch) && !NeedSkipIfCudaArchGreaterEqualThan(max_cuda_arch);
+  bool enable_cuda = HasCudaEnvironment(min_cuda_arch);
   if (enable_cuda) {
     OpTester tester("MoE", 1, onnxruntime::kMSDomain);
     tester.AddAttribute<int64_t>("k", static_cast<int64_t>(top_k));
@@ -93,10 +92,9 @@ static void RunQMoETest(const std::vector<float>& input, const std::vector<float
                         const std::vector<float>& output_data, int num_rows, int num_experts, int hidden_size,
                         int inter_size, std::string activation_type, int normalize_routing_weights = 0, int top_k = 1, int expert_weight_bits = 4) {
   constexpr int min_cuda_arch = 700;
-  constexpr int max_cuda_arch = 900;
 
   // Test CUDA execution provider
-  bool enable_cuda = HasCudaEnvironment(min_cuda_arch) && !NeedSkipIfCudaArchGreaterEqualThan(max_cuda_arch);
+  bool enable_cuda = HasCudaEnvironment(min_cuda_arch);
   if (enable_cuda) {
     OpTester cuda_tester("QMoE", 1, onnxruntime::kMSDomain);
     cuda_tester.AddAttribute<int64_t>("k", static_cast<int64_t>(top_k));
@@ -129,8 +127,8 @@ static void RunQMoETest(const std::vector<float>& input, const std::vector<float
       cuda_tester.AddInput<uint8_t>("fc3_experts_weights", fc3_experts_weights_dims, fc3_experts_weights);
       cuda_tester.AddInput<MLFloat16>("fc3_scales", fc3_scales_dims, ToFloat16(fc3_scales));
     } else {
-      cuda_tester.AddOptionalInputEdge<uint8_t>();   // fc3_experts_weights
-      cuda_tester.AddOptionalInputEdge<MLFloat16>(); // fc3_scales
+      cuda_tester.AddOptionalInputEdge<uint8_t>();    // fc3_experts_weights
+      cuda_tester.AddOptionalInputEdge<MLFloat16>();  // fc3_scales
     }
     cuda_tester.AddOptionalInputEdge<MLFloat16>();  // fc3_experts_bias
     cuda_tester.AddOutput<MLFloat16>("output", output_dims, ToFloat16(output_data));
@@ -142,7 +140,8 @@ static void RunQMoETest(const std::vector<float>& input, const std::vector<float
   }
 
   // Test CPU execution provider (always available)
-  {
+  // Skip CPU test if FC3 weights are provided since CPU doesn't support FC3
+  if (fc3_experts_weights.empty()) {
     OpTester cpu_tester("QMoE", 1, onnxruntime::kMSDomain);
     cpu_tester.AddAttribute<int64_t>("k", static_cast<int64_t>(top_k));
     cpu_tester.AddAttribute<std::string>("activation_type", activation_type);
@@ -163,13 +162,15 @@ static void RunQMoETest(const std::vector<float>& input, const std::vector<float
 
     cpu_tester.AddInput<uint8_t>("fc1_experts_weights", fc1_experts_weights_dims, fc1_experts_weights);
     cpu_tester.AddInput<float>("fc1_scales", fc1_scales_dims, fc1_scales);  // Use float, not MLFloat16
-    cpu_tester.AddOptionalInputEdge<MLFloat16>();  // fc1_experts_bias
+    cpu_tester.AddOptionalInputEdge<MLFloat16>();                           // fc1_experts_bias
     cpu_tester.AddInput<uint8_t>("fc2_experts_weights", fc2_experts_weights_dims, fc2_experts_weights);
     cpu_tester.AddInput<float>("fc2_scales", fc2_scales_dims, fc2_scales);  // Use float, not MLFloat16
-    cpu_tester.AddOptionalInputEdge<MLFloat16>();  // fc2_experts_bias
-    cpu_tester.AddOptionalInputEdge<uint8_t>();   // fc3_experts_weights (skip FC3 for CPU - not implemented)
-    cpu_tester.AddOptionalInputEdge<float>(); // fc3_scales (use float, not MLFloat16)
-    cpu_tester.AddOptionalInputEdge<MLFloat16>(); // fc3_experts_bias
+    cpu_tester.AddOptionalInputEdge<MLFloat16>();                           // fc2_experts_bias
+
+    // CPU doesn't support FC3, so always skip it
+    cpu_tester.AddOptionalInputEdge<uint8_t>();    // fc3_experts_weights (skip FC3 for CPU - not implemented)
+    cpu_tester.AddOptionalInputEdge<float>();      // fc3_scales (use float, not MLFloat16)
+    cpu_tester.AddOptionalInputEdge<MLFloat16>();  // fc3_experts_bias
     cpu_tester.AddOutput<MLFloat16>("output", output_dims, ToFloat16(output_data));
     cpu_tester.SetOutputTolerance(0.01f);  // Slightly higher tolerance for CPU vs CUDA differences
 
@@ -1338,7 +1339,7 @@ TEST(MoETest, QMoETest_CPU_Int4_MLAS) {
   // Use 0x88 which unpacks to 8,8 (around zero point 8 for 4-bit)
   std::vector<uint8_t> fc1_experts_weights(num_experts * hidden_size * inter_size / 2, 0x88);
   std::vector<uint8_t> fc2_experts_weights(num_experts * inter_size * hidden_size / 2, 0x77);  // 7,7 values
-  std::vector<uint8_t> fc3_experts_weights;  // Empty for CPU (FC3 not supported)
+  std::vector<uint8_t> fc3_experts_weights;                                                    // Empty for CPU (FC3 not supported)
 
   std::vector<float> fc1_scales(num_experts * inter_size, 0.1f);
   std::vector<float> fc2_scales(num_experts * hidden_size, 0.1f);
@@ -1368,7 +1369,7 @@ TEST(MoETest, QMoETest_CPU_Int8_MLAS) {
   // Use quantized weights near zero point (128) for reasonable dequantization
   std::vector<uint8_t> fc1_experts_weights(num_experts * hidden_size * inter_size, 130);  // 130 ≈ 128 + 2
   std::vector<uint8_t> fc2_experts_weights(num_experts * inter_size * hidden_size, 126);  // 126 ≈ 128 - 2
-  std::vector<uint8_t> fc3_experts_weights;  // Empty for CPU
+  std::vector<uint8_t> fc3_experts_weights;                                               // Empty for CPU
 
   std::vector<float> fc1_scales(num_experts * inter_size, 0.1f);
   std::vector<float> fc2_scales(num_experts * hidden_size, 0.1f);
@@ -1396,13 +1397,13 @@ TEST(MoETest, QMoETest_CPU_Int8_MLAS) {
   cpu_tester.AddInput<MLFloat16>("router_probs", router_probs_dims, ToFloat16(router_probs));
   cpu_tester.AddInput<uint8_t>("fc1_experts_weights", fc1_experts_weights_dims, fc1_experts_weights);
   cpu_tester.AddInput<float>("fc1_scales", fc1_scales_dims, fc1_scales);  // Use float, not MLFloat16
-  cpu_tester.AddOptionalInputEdge<MLFloat16>();  // fc1_experts_bias
+  cpu_tester.AddOptionalInputEdge<MLFloat16>();                           // fc1_experts_bias
   cpu_tester.AddInput<uint8_t>("fc2_experts_weights", fc2_experts_weights_dims, fc2_experts_weights);
   cpu_tester.AddInput<float>("fc2_scales", fc2_scales_dims, fc2_scales);  // Use float, not MLFloat16
-  cpu_tester.AddOptionalInputEdge<MLFloat16>();  // fc2_experts_bias
-  cpu_tester.AddOptionalInputEdge<uint8_t>();    // fc3_experts_weights (skip FC3 for CPU)
-  cpu_tester.AddOptionalInputEdge<float>();  // fc3_scales (use float, not MLFloat16)
-  cpu_tester.AddOptionalInputEdge<MLFloat16>();  // fc3_experts_bias
+  cpu_tester.AddOptionalInputEdge<MLFloat16>();                           // fc2_experts_bias
+  cpu_tester.AddOptionalInputEdge<uint8_t>();                             // fc3_experts_weights (skip FC3 for CPU)
+  cpu_tester.AddOptionalInputEdge<float>();                               // fc3_scales (use float, not MLFloat16)
+  cpu_tester.AddOptionalInputEdge<MLFloat16>();                           // fc3_experts_bias
   cpu_tester.AddOutput<MLFloat16>("output", output_dims, ToFloat16(output));
   cpu_tester.SetOutputTolerance(0.05f);  // Small tolerance since we expect near-zero output
 
@@ -1449,13 +1450,13 @@ TEST(MoETest, QMoETest_CPU_FC3_Error) {
   cpu_tester.AddInput<MLFloat16>("router_probs", router_probs_dims, ToFloat16(router_probs));
   cpu_tester.AddInput<uint8_t>("fc1_experts_weights", fc1_experts_weights_dims, fc1_experts_weights);
   cpu_tester.AddInput<float>("fc1_scales", fc1_scales_dims, fc1_scales);  // Use float for CPU
-  cpu_tester.AddOptionalInputEdge<MLFloat16>();  // fc1_experts_bias
+  cpu_tester.AddOptionalInputEdge<MLFloat16>();                           // fc1_experts_bias
   cpu_tester.AddInput<uint8_t>("fc2_experts_weights", fc2_experts_weights_dims, fc2_experts_weights);
-  cpu_tester.AddInput<float>("fc2_scales", fc2_scales_dims, fc2_scales);  // Use float for CPU
-  cpu_tester.AddOptionalInputEdge<MLFloat16>();  // fc2_experts_bias
+  cpu_tester.AddInput<float>("fc2_scales", fc2_scales_dims, fc2_scales);                               // Use float for CPU
+  cpu_tester.AddOptionalInputEdge<MLFloat16>();                                                        // fc2_experts_bias
   cpu_tester.AddInput<uint8_t>("fc3_experts_weights", fc3_experts_weights_dims, fc3_experts_weights);  // FC3 provided!
-  cpu_tester.AddInput<float>("fc3_scales", fc3_scales_dims, fc3_scales);  // Use float for CPU
-  cpu_tester.AddOptionalInputEdge<MLFloat16>();  // fc3_experts_bias
+  cpu_tester.AddInput<float>("fc3_scales", fc3_scales_dims, fc3_scales);                               // Use float for CPU
+  cpu_tester.AddOptionalInputEdge<MLFloat16>();                                                        // fc3_experts_bias
 
   std::vector<float> dummy_output(num_rows * hidden_size, 0.0f);
   cpu_tester.AddOutput<MLFloat16>("output", output_dims, ToFloat16(dummy_output));

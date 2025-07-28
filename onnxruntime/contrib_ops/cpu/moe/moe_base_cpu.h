@@ -183,7 +183,8 @@ class MoEBaseCPU {
       return ORT_MAKE_STATUS(ONNXRUNTIME, INVALID_ARGUMENT, "fc2_experts_scales[1] must be equal to hidden_size, got ",
                              fc2_experts_scales_dims[1], " and ", hidden_size);
     }
-    if (fc3_experts_scales_optional != nullptr && fc1_experts_scales_dims != fc3_experts_scales_optional->Shape().GetDims()) {
+    if (fc3_experts_scales_optional != nullptr &&
+        TensorShape(fc1_experts_scales_dims) != fc3_experts_scales_optional->Shape()) {
       return ORT_MAKE_STATUS(ONNXRUNTIME, INVALID_ARGUMENT,
                              "fc3_experts_scales must be equal to fc1_experts_scales, got ",
                              fc3_experts_scales_optional->Shape(), " and ", TensorShape(fc1_experts_scales_dims));
