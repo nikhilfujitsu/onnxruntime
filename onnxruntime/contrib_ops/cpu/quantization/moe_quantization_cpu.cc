@@ -394,7 +394,6 @@ Status QMoE::QuantizedMoEImpl(OpKernelContext* context,
           if (routing_weight <= 1e-6f) continue;  // Skip experts with negligible routing weight
 
           // FC1: input -> intermediate using pre-dequantized weights + MLAS SGEMM
-          int act = activation_type_ == ActivationType::SwiGLU ? 2 : 1;
           const float* fc1_expert_weights = dequant_fc1_weights.get() + expert_idx * moe_params.hidden_size * moe_params.inter_size * act;
           const MLFloat16* fc1_expert_bias_typed = fc1_bias_data ? fc1_bias_data + expert_idx * moe_params.inter_size * act : nullptr;
 
