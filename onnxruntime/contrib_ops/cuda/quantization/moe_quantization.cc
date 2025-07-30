@@ -14,12 +14,13 @@ namespace onnxruntime {
 namespace contrib {
 namespace cuda {
 
-#define REGISTER_KERNEL()                                                                  \
-  ONNX_OPERATOR_KERNEL_EX(QMoE, kMSDomain, 1, kCudaExecutionProvider,                      \
-                          (*KernelDefBuilder::Create())                                    \
-                              .MayInplace(0, 0)                                            \
-                              .TypeConstraint("T", BuildKernelDefConstraints<MLFloat16>()) \
-                              .TypeConstraint("T1", BuildKernelDefConstraints<uint8_t>()), \
+#define REGISTER_KERNEL()                                                                    \
+  ONNX_OPERATOR_KERNEL_EX(QMoE, kMSDomain, 1, kCudaExecutionProvider,                        \
+                          (*KernelDefBuilder::Create())                                      \
+                              .MayInplace(0, 0)                                              \
+                              .TypeConstraint("T", BuildKernelDefConstraints<MLFloat16>())   \
+                              .TypeConstraint("T1", BuildKernelDefConstraints<uint8_t>())    \
+                              .TypeConstraint("T2", BuildKernelDefConstraints<MLFloat16>()), \
                           QMoE);
 
 REGISTER_KERNEL()
