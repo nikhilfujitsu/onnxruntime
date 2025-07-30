@@ -101,6 +101,7 @@ static void RunQMoETest(const std::vector<float>& input, const std::vector<float
 
   // Test CUDA execution provider
   bool enable_cuda = HasCudaEnvironment(min_cuda_arch);
+  bool enable_webgpu = (nullptr != DefaultWebGpuExecutionProvider().get());
   if (enable_cuda) {
     OpTester cuda_tester("QMoE", 1, onnxruntime::kMSDomain);
     cuda_tester.AddAttribute<int64_t>("k", static_cast<int64_t>(top_k));
@@ -180,9 +181,10 @@ static void RunQMoETest(const std::vector<float>& input, const std::vector<float
     cpu_tester.AddOutput<MLFloat16>("output", output_dims, ToFloat16(output_data));
     cpu_tester.SetOutputTolerance(0.01f);  // Slightly higher tolerance for CPU vs CUDA differences
 
-    std::vector<std::unique_ptr<IExecutionProvider>> cpu_execution_providers;
-    cpu_execution_providers.push_back(DefaultCpuExecutionProvider());
-    cpu_tester.Run(OpTester::ExpectResult::kExpectSuccess, "", {}, nullptr, &cpu_execution_providers);
+    std::vector<std::unique_ptr<IExecutionProvider>> execution_providers;
+    execution_providers.push_back(DefaultCpuExecutionProvider());
+    execution_providers.push_back(DefaultWebGpuExecutionProvider());
+    cpu_tester.Run(OpTester::ExpectResult::kExpectSuccess, "", {}, nullptr, &execution_providers);
   }
 }
 
