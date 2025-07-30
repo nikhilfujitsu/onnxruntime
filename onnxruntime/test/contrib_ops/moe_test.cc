@@ -20,7 +20,8 @@ static void RunMoETest(const std::vector<float>& input, const std::vector<float>
   constexpr int max_cuda_arch = 900;
 
   bool enable_cuda = HasCudaEnvironment(min_cuda_arch) && !NeedSkipIfCudaArchGreaterEqualThan(max_cuda_arch);
-  if (enable_cuda) {
+  bool enable_webgpu = (nullptr != DefaultWebGpuExecutionProvider().get());
+  if (enable_cuda || enable_webgpu) {
     OpTester tester("MoE", 1, onnxruntime::kMSDomain);
     tester.AddAttribute<int64_t>("k", static_cast<int64_t>(top_k));
     tester.AddAttribute<std::string>("activation_type", activation_type);
@@ -78,7 +79,12 @@ static void RunMoETest(const std::vector<float>& input, const std::vector<float>
     }
 
     std::vector<std::unique_ptr<IExecutionProvider>> execution_providers;
-    execution_providers.push_back(DefaultCudaExecutionProvider());
+    if (enable_webgpu) {
+      execution_providers.push_back(DefaultWebGpuExecutionProvider());
+    }
+    if (enable_cuda) {
+      execution_providers.push_back(DefaultCudaExecutionProvider());
+    }
     tester.Run(OpTester::ExpectResult::kExpectSuccess, "", {}, nullptr, &execution_providers);
   }
 }
