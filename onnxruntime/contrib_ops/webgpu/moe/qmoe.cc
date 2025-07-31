@@ -5,8 +5,7 @@
 #include "core/providers/webgpu/webgpu_utils.h"
 #include "core/providers/webgpu/webgpu_supported_types.h"
 #include "contrib_ops/webgpu/webgpu_contrib_kernels.h"
-#include "contrib_ops/webgpu/moe/moe_base.h"
-#include "contrib_ops/webgpu/moe/moe.h"
+#include "contrib_ops/webgpu/moe/qmoe.h"
 
 namespace onnxruntime {
 namespace contrib {
@@ -16,7 +15,7 @@ using namespace onnxruntime::webgpu;
 using onnxruntime::webgpu::ComputeContext;
 
 
-Status MoEProgram::GenerateShaderCode(ShaderHelper& shader) const {
+Status QMoEProgram::GenerateShaderCode(ShaderHelper& shader) const {
   const auto& x = shader.AddInput("input", ShaderUsage::UseElementTypeAlias);
 #if 0
   const auto& x_shape = shader.AddIndices("input_shape", ShaderUsage::UseUniform | ShaderUsage::UseIndicesTypeAlias);
@@ -44,7 +43,7 @@ Status MoEProgram::GenerateShaderCode(ShaderHelper& shader) const {
   return Status::OK();
 }
 
-Status MoE::ComputeInternal(ComputeContext& context) const {
+Status QMoE::ComputeInternal(ComputeContext& context) const {
   const Tensor* input = context.Input(0);                // (num_rows, hidden_size) or (batch_size, sequence_length, hidden_size)
   const Tensor* router_probs = context.Input(1);         // (num_rows, num_experts)
   const Tensor* fc1_experts_weights = context.Input(2);  // (num_experts, hidden_size, inter_size)
@@ -67,7 +66,7 @@ Status MoE::ComputeInternal(ComputeContext& context) const {
   auto* output_tensor = context.Output(0, input_shape);
   int output_size = static_cast<int>(input_shape.Size());
 
-  MoEProgram program{input_shape};
+  QMoEProgram program{input_shape};
 
   program
       .AddInputs({{input, ProgramTensorMetadataDependency::Type}})
@@ -80,14 +79,25 @@ Status MoE::ComputeInternal(ComputeContext& context) const {
   return context.RunProgram(program);
 }
 
+namespace {
+const std::vector<MLDataType>& QMoET1Constraint() {
+  static std::vector<MLDataType> types{
+    DataTypeImpl::GetTensorType<uint8_t>()};
+    return types;
+  }
+} // namespace
+
 ONNX_OPERATOR_KERNEL_EX(
-    MoE,
+    QMoE,
     kMSDomain,
     1,
     kWebGpuExecutionProvider,
     (*KernelDefBuilder::Create())
-        .TypeConstraint("T", WebGpuSupportedFloatTypes()),
-    MoE);
+        .MayInplace(0, 0)
+        .TypeConstraint("T", WebGpuSupportedFloatTypes())
+        .TypeConstraint("T1", QMoET1Constraint())
+        .TypeConstraint("T2", WebGpuSupportedFloatTypes()),
+    QMoE);
 
 }  // namespace webgpu
 }  // namespace contrib

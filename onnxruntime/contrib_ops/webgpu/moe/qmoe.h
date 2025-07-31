@@ -5,6 +5,7 @@
 
 #include "core/providers/webgpu/program.h"
 #include "core/providers/webgpu/webgpu_kernel.h"
+#include "contrib_ops/webgpu/moe/moe_base.h"
 
 namespace onnxruntime {
 namespace contrib {
@@ -13,9 +14,9 @@ namespace webgpu {
 using namespace onnxruntime::webgpu;
 using onnxruntime::webgpu::ComputeContext;
 
-class MoEProgram final : public Program<MoEProgram> {
+class QMoEProgram final : public Program<QMoEProgram> {
  public:
-  MoEProgram(TensorShape output_shape) : Program<MoEProgram>{"MoE"}, output_shape_{output_shape} {}
+  QMoEProgram(TensorShape output_shape) : Program<QMoEProgram>{"QMoE"}, output_shape_{output_shape} {}
 
   Status GenerateShaderCode(ShaderHelper& sh) const override;
 
@@ -25,9 +26,9 @@ class MoEProgram final : public Program<MoEProgram> {
   TensorShape output_shape_;
 };
 
-class MoE final : public WebGpuKernel {
+class QMoE final : public WebGpuKernel {
  public:
-  MoE(const OpKernelInfo& info) : WebGpuKernel(info) {
+  QMoE(const OpKernelInfo& info) : WebGpuKernel(info) {
     k_ = static_cast<int>(info.GetAttrOrDefault<int64_t>("k", 128));
     normalize_routing_weights_ = static_cast<int>(info.GetAttrOrDefault<int64_t>("normalize_routing_weights", 0)) == 1;
     use_sparse_mixer_ = static_cast<int>(info.GetAttrOrDefault<int64_t>("use_sparse_mixer", 0)) == 1;
