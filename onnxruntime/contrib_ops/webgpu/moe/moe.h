@@ -25,7 +25,7 @@ class MoEProgram final : public Program<MoEProgram> {
   TensorShape output_shape_;
 };
 
-class MoE final : public WebGpuKernel {
+class MoE : public WebGpuKernel {
  public:
   MoE(const OpKernelInfo& info) : WebGpuKernel(info) {
     k_ = static_cast<int>(info.GetAttrOrDefault<int64_t>("k", 128));
@@ -49,7 +49,7 @@ class MoE final : public WebGpuKernel {
 
   Status ComputeInternal(ComputeContext& context) const override;
 
- private:
+protected:
   int k_;
   bool normalize_routing_weights_;
   bool use_sparse_mixer_;

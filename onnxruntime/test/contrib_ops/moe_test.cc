@@ -183,7 +183,9 @@ static void RunQMoETest(const std::vector<float>& input, const std::vector<float
 
     std::vector<std::unique_ptr<IExecutionProvider>> execution_providers;
     execution_providers.push_back(DefaultCpuExecutionProvider());
-    execution_providers.push_back(DefaultWebGpuExecutionProvider());
+    if (enable_webgpu) {
+      execution_providers.push_back(DefaultWebGpuExecutionProvider());
+    }
     cpu_tester.Run(OpTester::ExpectResult::kExpectSuccess, "", {}, nullptr, &execution_providers);
   }
 }
@@ -1386,6 +1388,10 @@ TEST(MoETest, QMoETest_CPU_Int4_MLAS) {
   cpu_tester.SetOutputTolerance(0.01f);  // Higher tolerance since we expect near-zero output
 
   std::vector<std::unique_ptr<IExecutionProvider>> cpu_execution_providers;
+  bool enable_webgpu = (nullptr != DefaultWebGpuExecutionProvider().get());
+  if (enable_webgpu) {
+    cpu_execution_providers.push_back(DefaultWebGpuExecutionProvider());
+  }
   cpu_execution_providers.push_back(DefaultCpuExecutionProvider());
   cpu_tester.Run(OpTester::ExpectResult::kExpectSuccess, "", {}, nullptr, &cpu_execution_providers);
 }

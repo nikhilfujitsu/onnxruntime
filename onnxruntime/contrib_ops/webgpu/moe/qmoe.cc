@@ -44,29 +44,53 @@ Status QMoEProgram::GenerateShaderCode(ShaderHelper& shader) const {
 }
 
 Status QMoE::ComputeInternal(ComputeContext& context) const {
-  const Tensor* input = context.Input(0);                // (num_rows, hidden_size) or (batch_size, sequence_length, hidden_size)
-  const Tensor* router_probs = context.Input(1);         // (num_rows, num_experts)
-  const Tensor* fc1_experts_weights = context.Input(2);  // (num_experts, hidden_size, inter_size)
-  const Tensor* fc1_experts_bias = context.Input(3);     // (num_experts, hidden_size, inter_size)
-  const Tensor* fc2_experts_weights = context.Input(4);  // (num_experts, hidden_size, inter_size)
-  const Tensor* fc2_experts_bias = context.Input(5);     // (num_experts, hidden_size, inter_size)
-  const Tensor* fc3_experts_weights = context.Input(6);  // (num_experts, hidden_size, inter_size)
-  const Tensor* fc3_experts_bias = context.Input(7);     // (num_experts, hidden_size, inter_size)
+  const Tensor* input = context.Input<Tensor>(0);
+  const Tensor* router_probs = context.Input<Tensor>(1);
+  const Tensor* fc1_experts_weights = context.Input<Tensor>(2);
+  const Tensor* fc1_scales = context.Input<Tensor>(3);
+  const Tensor* fc1_experts_bias_optional = context.Input<Tensor>(4);
+  const Tensor* fc2_experts_weights = context.Input<Tensor>(5);
+  const Tensor* fc2_scales = context.Input<Tensor>(6);
+  const Tensor* fc2_experts_bias_optional = context.Input<Tensor>(7);
+  const Tensor* fc3_experts_weights_optional = context.Input<Tensor>(8);
+  const Tensor* fc3_scales_optional = context.Input<Tensor>(9);
+  const Tensor* fc3_experts_bias_optional = context.Input<Tensor>(10);
 
+  MoEQuantType quant_type = expert_weight_bits_ == 4 ? MoEQuantType::UINT4 : MoEQuantType::UINT8;
   MoEParameters moe_params;
-  MoEQuantType quant_type = MoEQuantType::None;
 
-  ORT_RETURN_IF_ERROR(CheckInputs(moe_params, quant_type, input, router_probs,
-                                  fc1_experts_weights, fc1_experts_bias,
-                                  fc2_experts_weights, fc2_experts_bias,
-                                  fc3_experts_weights, fc3_experts_bias));
+  ORT_RETURN_IF_ERROR(CheckInputs(moe_params, quant_type, input, router_probs, fc1_experts_weights,
+                                  fc1_experts_bias_optional, fc2_experts_weights, fc2_experts_bias_optional,
+                                  fc3_experts_weights_optional, fc3_experts_bias_optional));
+  ORT_RETURN_IF_ERROR(CheckInputScales(fc1_scales, fc2_scales, fc3_scales_optional, moe_params.num_experts,
+                                       moe_params.hidden_size, moe_params.inter_size, activation_type_));
+
 
   const auto& input_shape = input->Shape();
+
+    // SwiGLU validation - FC3 not supported (match CUDA FasterTransformer)
+  bool is_swiglu = (activation_type_ == MoEActivationType::SwiGLU);
+  if (is_swiglu && fc3_experts_weights_optional != nullptr) {
+    return ORT_MAKE_STATUS(ONNXRUNTIME, NOT_IMPLEMENTED,
+                           "SwiGLU activation is not supported with fc3. Gate weights should be concatenated with FC1 weights.");
+  }
+  if (!is_swiglu && fc3_experts_weights_optional != nullptr) {
+    return ORT_MAKE_STATUS(ONNXRUNTIME, NOT_IMPLEMENTED,
+                           "FC3 gating is not yet implemented for non-SwiGLU activations on CPU.");
+  }
 
   auto* output_tensor = context.Output(0, input_shape);
   int output_size = static_cast<int>(input_shape.Size());
 
-  QMoEProgram program{input_shape};
+  // run each expert
+  Tensor metadata = context.CreateGPUTensor(DataTypeImpl::GetType<float>(), metadata_shape);
+    const int64_t fc1_output_size = is_swiglu ? 2 * moe_params.inter_size : moe_params.inter_size;
+    auto dequant_fc1_weights = IAllocator::MakeUniquePtr<float>(allocator,
+                                                                static_cast<size_t>(moe_params.num_experts * moe_params.hidden_size * fc1_output_size));
+    auto dequant_fc2_weights = IAllocator::MakeUniquePtr<float>(allocator,
+                                                                static_cast<size_t>(moe_params.num_experts * moe_params.inter_size * moe_params.hidden_size));
+
+  QMoEProgram program{input_shape, activation_type_};
 
   program
       .AddInputs({{input, ProgramTensorMetadataDependency::Type}})

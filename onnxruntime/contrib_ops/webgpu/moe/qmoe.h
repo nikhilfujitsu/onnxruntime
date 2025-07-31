@@ -6,6 +6,7 @@
 #include "core/providers/webgpu/program.h"
 #include "core/providers/webgpu/webgpu_kernel.h"
 #include "contrib_ops/webgpu/moe/moe_base.h"
+#include "contrib_ops/webgpu/moe/moe.h"
 
 namespace onnxruntime {
 namespace contrib {
@@ -16,7 +17,8 @@ using onnxruntime::webgpu::ComputeContext;
 
 class QMoEProgram final : public Program<QMoEProgram> {
  public:
-  QMoEProgram(TensorShape output_shape) : Program<QMoEProgram>{"QMoE"}, output_shape_{output_shape} {}
+  QMoEProgram(TensorShape output_shape,  MoEActivationType activation_type) :
+    Program<QMoEProgram>{"QMoE"}, output_shape_{output_shape}, activation_type_{activation_type} {};
 
   Status GenerateShaderCode(ShaderHelper& sh) const override;
 
@@ -24,37 +26,21 @@ class QMoEProgram final : public Program<QMoEProgram> {
 
  private:
   TensorShape output_shape_;
+  MoEActivationType activation_type_;
 };
 
-class QMoE final : public WebGpuKernel {
+class QMoE final : public MoE {
  public:
-  QMoE(const OpKernelInfo& info) : WebGpuKernel(info) {
-    k_ = static_cast<int>(info.GetAttrOrDefault<int64_t>("k", 128));
-    normalize_routing_weights_ = static_cast<int>(info.GetAttrOrDefault<int64_t>("normalize_routing_weights", 0)) == 1;
-    use_sparse_mixer_ = static_cast<int>(info.GetAttrOrDefault<int64_t>("use_sparse_mixer", 0)) == 1;
-    std::string activation_type = info.GetAttrOrDefault<std::string>("activation_type", "relu");
-    if (activation_type == "relu") {
-      activation_type_ = MoEActivationType::Relu;
-    } else if (activation_type == "gelu") {
-      activation_type_ = MoEActivationType::Gelu;
-    } else if (activation_type == "silu") {
-      activation_type_ = MoEActivationType::Silu;
-    } else if (activation_type == "identity") {
-      activation_type_ = MoEActivationType::Identity;
-    } else if (activation_type == "swiglu") {
-      activation_type_ = MoEActivationType::SwiGLU;
-    } else {
-      ORT_THROW("Unsupported MoE activation type: ", activation_type);
-    }
+  QMoE(const OpKernelInfo& info) : MoE(info) {
+    ORT_ENFORCE(info.GetAttr<int64_t>("expert_weight_bits", &expert_weight_bits_).IsOK());
+    ORT_ENFORCE(expert_weight_bits_ == 8 || expert_weight_bits_ == 4,
+       "expert_weight_bits must be 4 or 8, but got ", expert_weight_bits_);
   }
 
   Status ComputeInternal(ComputeContext& context) const override;
 
  private:
-  int k_;
-  bool normalize_routing_weights_;
-  bool use_sparse_mixer_;
-  MoEActivationType activation_type_;
+  int64_t expert_weight_bits_;
 };
 
 }  // namespace webgpu
