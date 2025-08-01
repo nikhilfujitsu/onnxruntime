@@ -1405,7 +1405,7 @@ ONNX_MS_OPERATOR_SET_SCHEMA(MoE, 1,
                                 .Input(6, "fc3_experts_weights", "3D optional input tensor with shape (num_experts, hidden_size, inter_size)", "T", OpSchema::Optional)
                                 .Input(7, "fc3_experts_bias", "2D optional input tensor with shape (num_experts, inter_size)", "T", OpSchema::Optional)
                                 .Output(0, "output", "2D input tensor with shape (num_rows, hidden_size) or 3D input tensor with shape (batch_size, sequence_length, hidden_size)", "T")
-                                .TypeConstraint("T", {"tensor(float)", "tensor(float16)"}, "Constrain input and output types to float or float16 tensors.")
+                                .TypeConstraint("T", {"tensor(float)", "tensor(float16)", "tensor(bfloat16)"}, "Constrain input and output types to float tensors.")
                                 .TypeAndShapeInferenceFunction(ONNX_NAMESPACE::propagateShapeAndTypeFromFirstInput));
 
 ONNX_MS_OPERATOR_SET_SCHEMA(
@@ -1476,7 +1476,7 @@ ONNX_MS_OPERATOR_SET_SCHEMA(
                 "2D input tensor with shape (num_rows, hidden_size) or 3D input tensor with shape "
                 "(batch_size, sequence_length, hidden_size)",
                 "T")
-        .TypeConstraint("T", {"tensor(float16)"}, "Constrain input and output types to float or float16 tensors.")
+        .TypeConstraint("T", {"tensor(float)", "tensor(float16)", "tensor(bfloat16)"}, "Constrain input and output types to float tensors.")
         .TypeConstraint("T1", {"tensor(uint8)"}, "Constrain weights type to uint8 tensors.")
         .TypeConstraint("T2", {"tensor(float)", "tensor(float16)"}, "Constrain scales type to float or float16 tensors.")
         .TypeAndShapeInferenceFunction(ONNX_NAMESPACE::propagateShapeAndTypeFromFirstInput));
