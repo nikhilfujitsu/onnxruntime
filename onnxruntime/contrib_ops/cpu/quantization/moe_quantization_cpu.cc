@@ -55,17 +55,18 @@ Status QMoE::Compute(OpKernelContext* context) const {
   const Tensor* fc3_scales_optional = context->Input<Tensor>(9);
   const Tensor* fc3_experts_bias_optional = context->Input<Tensor>(10);
 
-  MoEQuantType quant_type = expert_weight_bits_ == 4 ? MoEQuantType::UINT4 : MoEQuantType::UINT8;
   MoEParameters moe_params;
-  ORT_RETURN_IF_ERROR(CheckInputs(moe_params, quant_type, input, router_probs, fc1_experts_weights,
-                                  fc1_experts_bias_optional, fc2_experts_weights, fc2_experts_bias_optional,
-                                  fc3_experts_weights_optional, fc3_experts_bias_optional));
-  ORT_RETURN_IF_ERROR(CheckInputScales(fc1_scales, fc2_scales, fc3_scales_optional, moe_params.num_experts,
-                                       moe_params.hidden_size, moe_params.inter_size));
+  ORT_RETURN_IF_ERROR(::onnxruntime::contrib::moe_helper::CheckInputs<Tensor>(
+      moe_params, input, router_probs,
+      fc1_experts_weights, fc1_experts_bias_optional, fc1_scales,
+      fc2_experts_weights, fc2_experts_bias_optional, fc2_scales,
+      fc3_experts_weights_optional, fc3_experts_bias_optional, fc3_scales_optional,
+      expert_weight_bits_ == 4 ? 2 : 1,
+      activation_type_ == ActivationType::SwiGLU));
 
   // Dispatch based on input data type
   if (input->IsDataType<MLFloat16>()) {
-    if (quant_type == MoEQuantType::UINT4) {
+    if (expert_weight_bits_ == 4) {
       return QuantizedMoEImpl<true, MLFloat16>(context, moe_params, input, router_probs,
                                                fc1_experts_weights, fc1_experts_bias_optional, fc2_experts_weights,
                                                fc2_experts_bias_optional, fc3_experts_weights_optional,
@@ -77,7 +78,7 @@ Status QMoE::Compute(OpKernelContext* context) const {
                                                 fc3_experts_bias_optional, fc1_scales, fc2_scales, fc3_scales_optional);
     }
   } else if (input->IsDataType<float>()) {
-    if (quant_type == MoEQuantType::UINT4) {
+    if (expert_weight_bits_ == 4) {
       return QuantizedMoEImpl<true, float>(context, moe_params, input, router_probs,
                                            fc1_experts_weights, fc1_experts_bias_optional, fc2_experts_weights,
                                            fc2_experts_bias_optional, fc3_experts_weights_optional,
@@ -272,11 +273,12 @@ Status QMoE::QuantizedMoEImpl(OpKernelContext* context,
   const float* dequant_fc2_weights = prepacked_fc2_weights_data_;
 
   // Process tokens in parallel
+  const double cost_per_token = static_cast<double>(moe_params.hidden_size * moe_params.inter_size * moe_params.num_experts);
   concurrency::ThreadPool::TryParallelFor(
       thread_pool, static_cast<std::ptrdiff_t>(moe_params.num_rows),
-      static_cast<double>(std::max<int64_t>(1, moe_params.num_rows / num_threads)),
+      cost_per_token,
       [&](ptrdiff_t start_token, ptrdiff_t end_token) {
-        const int64_t thread_id = start_token / ((moe_params.num_rows + num_threads - 1) / num_threads);
+        const int64_t thread_id = start_token % num_threads;
         const int64_t thread_fc1_size = is_4bit ? (moe_params.inter_size * (is_swiglu ? 2 : 1)) : (moe_params.inter_size * act_multiplier);
         float* thread_fc1_output = thread_fc1_buffers.get() + thread_id * thread_fc1_size;
         float* thread_fc2_output = thread_fc2_buffers.get() + thread_id * moe_params.hidden_size;
@@ -303,13 +305,14 @@ Status QMoE::QuantizedMoEImpl(OpKernelContext* context,
             fc1_params.A = token_input;
             fc1_params.lda = static_cast<size_t>(moe_params.hidden_size);
             fc1_params.B = fc1_expert_weights;
-            fc1_params.ldb = static_cast<size_t>(moe_params.hidden_size);
+            fc1_params.ldb = static_cast<size_t>(fc1_output_size);  // For column-major with CblasTrans, ldb is the width of the output
             fc1_params.C = thread_fc1_output;
             fc1_params.ldc = static_cast<size_t>(fc1_bias_size);
             fc1_params.alpha = 1.0f;
             fc1_params.beta = 0.0f;
 
-            MlasGemm(CblasNoTrans, CblasNoTrans, 1, static_cast<size_t>(fc1_bias_size), static_cast<size_t>(moe_params.hidden_size), fc1_params, nullptr);
+            // Use CblasTrans for B matrix since weights are stored in column-major format
+            MlasGemm(CblasNoTrans, CblasTrans, 1, static_cast<size_t>(fc1_bias_size), static_cast<size_t>(moe_params.hidden_size), fc1_params, nullptr);
 
             // Handle different activation types
             if (is_swiglu) {
@@ -321,7 +324,7 @@ Status QMoE::QuantizedMoEImpl(OpKernelContext* context,
                   thread_fc1_output[i] += fc1_expert_bias_float[i];
                 }
               }
-              contrib::ApplySwiGLUActivation(thread_fc1_output, moe_params.inter_size, is_4bit);
+              contrib::ApplySwiGLUActivation(thread_fc1_output, moe_params.inter_size, true);
             } else {
               // Standard activation (non-SwiGLU)
               if (fc1_bias_data) {
@@ -346,13 +349,14 @@ Status QMoE::QuantizedMoEImpl(OpKernelContext* context,
             fc2_params.A = thread_fc1_output;
             fc2_params.lda = static_cast<size_t>(moe_params.inter_size);
             fc2_params.B = fc2_expert_weights;
-            fc2_params.ldb = static_cast<size_t>(moe_params.inter_size);
+            fc2_params.ldb = static_cast<size_t>(moe_params.hidden_size);  // For column-major with CblasTrans, ldb is the width of the output
             fc2_params.C = thread_fc2_output;
             fc2_params.ldc = static_cast<size_t>(moe_params.hidden_size);
             fc2_params.alpha = 1.0f;
             fc2_params.beta = 0.0f;
 
-            MlasGemm(CblasNoTrans, CblasNoTrans, 1, static_cast<size_t>(moe_params.hidden_size), static_cast<size_t>(moe_params.inter_size), fc2_params, nullptr);
+            // Use CblasTrans for B matrix since weights are stored in column-major format
+            MlasGemm(CblasNoTrans, CblasTrans, 1, static_cast<size_t>(moe_params.hidden_size), static_cast<size_t>(moe_params.inter_size), fc2_params, nullptr);
 
             // Add bias, apply routing weight, and accumulate to final result
             if (fc2_bias_data) {
@@ -396,6 +400,8 @@ Status QMoE::PrepackAndDequantizeWeights(OpKernelContext* context,
                                          const Tensor* fc1_scales,
                                          const Tensor* fc2_scales,
                                          bool is_swiglu) {
+  // This function prepacks and dequantizes weights while preserving column-major format
+  // We use CblasTrans in GEMM calls to properly handle the column-major format
   // Get thread pool
   auto* thread_pool = context->GetOperatorThreadPool();
 
@@ -408,10 +414,6 @@ Status QMoE::PrepackAndDequantizeWeights(OpKernelContext* context,
 
   AllocatorPtr allocator;
   ORT_RETURN_IF_ERROR(context->GetTempSpaceAllocator(&allocator));
-
-  const int64_t num_threads = std::min<int64_t>(
-      static_cast<int64_t>(concurrency::ThreadPool::DegreeOfParallelism(thread_pool)),
-      moe_params.num_experts);
 
   // Prepare scales in float format
   const int64_t fc1_scales_size = moe_params.num_experts * (is_swiglu ? 2 * moe_params.inter_size : moe_params.inter_size);
@@ -464,7 +466,8 @@ Status QMoE::PrepackAndDequantizeWeights(OpKernelContext* context,
   prepacked_fc1_weights_data_ = prepacked_fc1_weights_.get();
   prepacked_fc2_weights_data_ = prepacked_fc2_weights_.get();
 
-  // Helper lambda for dequantizing a single weight value - updated for symmetric quantization
+  // Helper lambda for dequantizing a single weight value
+  // Handles symmetric quantization and keeps column-major format for use with CblasTrans
   auto DequantizeWeight = [&](const uint8_t* weights, size_t linear_idx,
                               const float* scales, int64_t scale_idx) -> float {
     if (is_4bit) {
@@ -486,9 +489,10 @@ Status QMoE::PrepackAndDequantizeWeights(OpKernelContext* context,
   };
 
   // Dequantize FC1 weights for all experts
+  const double fc1_cost_per_expert = static_cast<double>(moe_params.hidden_size * (is_4bit ? fc1_output_size : moe_params.inter_size * act_multiplier));
   concurrency::ThreadPool::TryParallelFor(
       thread_pool, static_cast<std::ptrdiff_t>(moe_params.num_experts),
-      static_cast<double>(std::max<int64_t>(1, moe_params.num_experts / num_threads)),
+      fc1_cost_per_expert,
       [&](ptrdiff_t expert_start, ptrdiff_t expert_end) {
         for (std::ptrdiff_t expert_idx = expert_start; expert_idx < expert_end; ++expert_idx) {
           const uint8_t* fc1_expert_weights = fc1_weights_data + static_cast<int64_t>(SafeInt<int64_t>(expert_idx)) * fc1_weight_stride;
@@ -496,29 +500,34 @@ Status QMoE::PrepackAndDequantizeWeights(OpKernelContext* context,
           float* dequant_fc1_expert = prepacked_fc1_weights_data_ + static_cast<int64_t>(SafeInt<int64_t>(expert_idx)) * moe_params.hidden_size * (is_4bit ? fc1_output_size : moe_params.inter_size * act_multiplier);
 
           const int64_t output_cols = is_4bit ? fc1_output_size : moe_params.inter_size * act_multiplier;
-          for (int64_t out_col = 0; out_col < output_cols; ++out_col) {
-            for (int64_t in_col = 0; in_col < moe_params.hidden_size; ++in_col) {
-              size_t linear_idx = static_cast<size_t>(out_col * moe_params.hidden_size + in_col);
-              dequant_fc1_expert[linear_idx] = DequantizeWeight(fc1_expert_weights, linear_idx, fc1_expert_scales, out_col);
+          for (int64_t in_col = 0; in_col < moe_params.hidden_size; ++in_col) {
+            for (int64_t out_col = 0; out_col < output_cols; ++out_col) {
+              // For column-major order, keep the original layout for CblasTrans
+              size_t linear_idx = static_cast<size_t>(in_col * output_cols + out_col);
+              // Keep the weights in column-major format since we're using CblasTrans in GEMM
+              dequant_fc1_expert[in_col * output_cols + out_col] = DequantizeWeight(fc1_expert_weights, linear_idx, fc1_expert_scales, out_col);
             }
           }
         }
       });
 
   // Dequantize FC2 weights for all experts
+  const double fc2_cost_per_expert = static_cast<double>(fc1_output_size * moe_params.hidden_size);
   concurrency::ThreadPool::TryParallelFor(
       thread_pool, static_cast<std::ptrdiff_t>(moe_params.num_experts),
-      static_cast<double>(std::max<int64_t>(1, moe_params.num_experts / num_threads)),
+      fc2_cost_per_expert,
       [&](ptrdiff_t expert_start, ptrdiff_t expert_end) {
         for (std::ptrdiff_t expert_idx = expert_start; expert_idx < expert_end; ++expert_idx) {
           const uint8_t* fc2_expert_weights = fc2_weights_data + static_cast<int64_t>(SafeInt<int64_t>(expert_idx)) * fc2_weight_stride;
           const float* fc2_expert_scales = fc2_scales_data + static_cast<int64_t>(SafeInt<int64_t>(expert_idx)) * moe_params.hidden_size;
           float* dequant_fc2_expert = prepacked_fc2_weights_data_ + static_cast<int64_t>(SafeInt<int64_t>(expert_idx)) * moe_params.inter_size * moe_params.hidden_size;
 
-          for (int64_t out_col = 0; out_col < moe_params.hidden_size; ++out_col) {
-            for (int64_t in_col = 0; in_col < moe_params.inter_size; ++in_col) {
-              size_t linear_idx = static_cast<size_t>(out_col * moe_params.inter_size + in_col);
-              dequant_fc2_expert[linear_idx] = DequantizeWeight(fc2_expert_weights, linear_idx, fc2_expert_scales, out_col);
+          for (int64_t in_col = 0; in_col < moe_params.inter_size; ++in_col) {
+            for (int64_t out_col = 0; out_col < moe_params.hidden_size; ++out_col) {
+              // For column-major order, keep the original layout for CblasTrans
+              size_t linear_idx = static_cast<size_t>(in_col * moe_params.hidden_size + out_col);
+              // Keep the weights in column-major format since we're using CblasTrans in GEMM
+              dequant_fc2_expert[in_col * moe_params.hidden_size + out_col] = DequantizeWeight(fc2_expert_weights, linear_idx, fc2_expert_scales, out_col);
             }
           }
         }

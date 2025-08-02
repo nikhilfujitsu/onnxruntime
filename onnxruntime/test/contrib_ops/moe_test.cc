@@ -84,6 +84,11 @@ static void RunMoETest(const std::vector<float>& input, const std::vector<float>
 
 // TODO(wy): Add python parity tests that can serve as examples. Need cutlass upgrade to build cutlass extensions to
 // add weights preprocesser to onnxruntime_pybind_quant.cc
+// Run QMoE test with proper parameters:
+// - Weights are stored in column-major format
+// - SwiGLU activation always uses interleaved format (when activation_type is "swiglu")
+// - 4-bit: range = [-8, 7] stored as uint8 values [0, 15]
+// - 8-bit: range = [-128, 127] stored as uint8 values [0, 255]
 static void RunQMoETest(const std::vector<float>& input, const std::vector<float>& router_probs,
                         const std::vector<uint8_t>& fc1_experts_weights,
                         const std::vector<uint8_t>& fc2_experts_weights,
@@ -103,11 +108,28 @@ static void RunQMoETest(const std::vector<float>& input, const std::vector<float
 
     std::vector<int64_t> input_dims = {num_rows, hidden_size};
     std::vector<int64_t> router_probs_dims = {num_rows, num_experts};
-    // Adjust weight dimensions based on quantization type for CUDA as well
-    std::vector<int64_t> fc1_experts_weights_dims = {num_experts, hidden_size, expert_weight_bits == 4 ? inter_size / 2 : inter_size};
+
+    // Adjust weight dimensions based on quantization type and activation
+    // For column-major weights, dimensions are {num_experts, hidden_size, inter_size} with adjustments:
+    // 1. For 4-bit, the last dimension is halved because each uint8 stores 2 values
+    // 2. For SwiGLU, inter_size is doubled to accommodate both gate and value paths
+    bool is_swiglu = (activation_type == "swiglu");
+    int fc1_last_dim = inter_size;
+    if (is_swiglu) {
+        // SwiGLU always uses interleaved format regardless of bit width
+        fc1_last_dim = inter_size * 2;
+    }
+    if (expert_weight_bits == 4) {
+        // Pack 2 values per byte for 4-bit
+        fc1_last_dim = fc1_last_dim / 2;
+    }
+
+    std::vector<int64_t> fc1_experts_weights_dims = {num_experts, hidden_size, fc1_last_dim};
     std::vector<int64_t> fc2_experts_weights_dims = {num_experts, inter_size, expert_weight_bits == 4 ? hidden_size / 2 : hidden_size};
     std::vector<int64_t> fc3_experts_weights_dims = fc1_experts_weights_dims;
-    std::vector<int64_t> fc1_scales_dims = {num_experts, inter_size};
+
+    // For scales, adjust dimension based on SwiGLU
+    std::vector<int64_t> fc1_scales_dims = {num_experts, is_swiglu ? inter_size * 2 : inter_size};
     std::vector<int64_t> fc2_scales_dims = {num_experts, hidden_size};
     std::vector<int64_t> fc3_scales_dims = fc1_scales_dims;
     std::vector<int64_t> output_dims = {num_rows, hidden_size};
@@ -150,10 +172,25 @@ static void RunQMoETest(const std::vector<float>& input, const std::vector<float
 
     std::vector<int64_t> input_dims = {num_rows, hidden_size};
     std::vector<int64_t> router_probs_dims = {num_rows, num_experts};
-    // Adjust weight dimensions based on quantization type
-    std::vector<int64_t> fc1_experts_weights_dims = {num_experts, hidden_size, expert_weight_bits == 4 ? inter_size / 2 : inter_size};
+
+    // Adjust weight dimensions based on quantization type and activation
+    // For column-major weights, dimensions are {num_experts, hidden_size, inter_size} with adjustments:
+    // 1. For 4-bit, the last dimension is halved because each uint8 stores 2 values
+    // 2. For SwiGLU, inter_size is doubled to accommodate both gate and value paths (always interleaved)
+    bool is_swiglu = (activation_type == "swiglu");
+    int fc1_last_dim = inter_size;
+    if (is_swiglu) {
+        // SwiGLU always uses interleaved format regardless of bit width
+        fc1_last_dim = inter_size * 2;
+    }
+    if (expert_weight_bits == 4) {
+        // Pack 2 values per byte for 4-bit
+        fc1_last_dim = fc1_last_dim / 2;
+    }
+
+    std::vector<int64_t> fc1_experts_weights_dims = {num_experts, hidden_size, fc1_last_dim};
     std::vector<int64_t> fc2_experts_weights_dims = {num_experts, inter_size, expert_weight_bits == 4 ? hidden_size / 2 : hidden_size};
-    std::vector<int64_t> fc1_scales_dims = {num_experts, inter_size};
+    std::vector<int64_t> fc1_scales_dims = {num_experts, is_swiglu ? inter_size * 2 : inter_size};
     std::vector<int64_t> fc2_scales_dims = {num_experts, hidden_size};
     std::vector<int64_t> output_dims = {num_rows, hidden_size};
 
@@ -1358,7 +1395,7 @@ TEST(MoETest, QMoETest_CPU_Int4_MLAS) {
 
   std::vector<int64_t> input_dims = {num_rows, hidden_size};
   std::vector<int64_t> router_probs_dims = {num_rows, num_experts};
-  std::vector<int64_t> fc1_experts_weights_dims = {num_experts, hidden_size, inter_size / 2};  // /2 for 4-bit
+  std::vector<int64_t> fc1_experts_weights_dims = {num_experts, hidden_size, inter_size / 2};  // legacy shape
   std::vector<int64_t> fc2_experts_weights_dims = {num_experts, inter_size, hidden_size / 2};
   std::vector<int64_t> fc1_scales_dims = {num_experts, inter_size};
   std::vector<int64_t> fc2_scales_dims = {num_experts, hidden_size};
@@ -1422,7 +1459,7 @@ TEST(MoETest, QMoETest_CPU_Int8_MLAS) {
 
   std::vector<int64_t> input_dims = {num_rows, hidden_size};
   std::vector<int64_t> router_probs_dims = {num_rows, num_experts};
-  std::vector<int64_t> fc1_experts_weights_dims = {num_experts, hidden_size, inter_size};  // No /2 for 8-bit
+  std::vector<int64_t> fc1_experts_weights_dims = {num_experts, hidden_size, inter_size};  // legacy shape
   std::vector<int64_t> fc2_experts_weights_dims = {num_experts, inter_size, hidden_size};
   std::vector<int64_t> fc1_scales_dims = {num_experts, inter_size};
   std::vector<int64_t> fc2_scales_dims = {num_experts, hidden_size};
@@ -1474,7 +1511,7 @@ TEST(MoETest, QMoETest_CPU_FC3_Error) {
 
   std::vector<int64_t> input_dims = {num_rows, hidden_size};
   std::vector<int64_t> router_probs_dims = {num_rows, num_experts};
-  std::vector<int64_t> fc1_experts_weights_dims = {num_experts, hidden_size, inter_size / 2};
+  std::vector<int64_t> fc1_experts_weights_dims = {num_experts, hidden_size, inter_size / 2};  // legacy shape
   std::vector<int64_t> fc2_experts_weights_dims = {num_experts, inter_size, hidden_size / 2};
   std::vector<int64_t> fc3_experts_weights_dims = {num_experts, hidden_size, inter_size / 2};
   std::vector<int64_t> fc1_scales_dims = {num_experts, inter_size};
@@ -1506,6 +1543,8 @@ TEST(MoETest, QMoETest_CPU_FC3_Error) {
 
 TEST(MoETest, QMoETest_CPU_SwiGLU_Int4) {
   // Test CPU implementation with 4-bit quantization and SwiGLU activation
+  // SwiGLU activation ALWAYS uses interleaved format regardless of bit width (4-bit or 8-bit)
+  // Weights are stored in column-major format
   int num_rows = 2;
   int num_experts = 2;
   int hidden_size = 16;
@@ -1517,17 +1556,19 @@ TEST(MoETest, QMoETest_CPU_SwiGLU_Int4) {
 
   const std::vector<float> router_probs = {0.6f, 0.4f, 0.3f, 0.7f};
 
-  // For SwiGLU, FC1 weights need to be 2x inter_size (concatenated linear + gate weights)
+  // For SwiGLU with column-major weights, FC1 weights need to be 2x inter_size (concatenated gate + value weights)
   // 4-bit: each uint8 stores 2 weights, so we need (hidden_size * inter_size * 2) / 2 uint8s per expert
-  const int fc1_weight_size_per_expert = hidden_size * inter_size * 2 / 2;  // For 4-bit SwiGLU
-  const int fc2_weight_size_per_expert = inter_size * hidden_size / 2;      // For 4-bit FC2
+  const int fc1_weight_size_per_expert = hidden_size * inter_size * 2 / 2;  // For 4-bit SwiGLU with column-major storage
+  const int fc2_weight_size_per_expert = inter_size * hidden_size / 2;      // For 4-bit FC2 with column-major storage
 
   // Generate test weights for symmetric quantization (zero point is 0)
+  // For 4-bit symmetric quantization, range is [-8, 7] stored as uint8 values [0, 15]
   std::vector<uint8_t> fc1_experts_weights(num_experts * fc1_weight_size_per_expert, 0x12);  // 1,2 -> small positive weights
   std::vector<uint8_t> fc2_experts_weights(num_experts * fc2_weight_size_per_expert, 0xFF);  // -1,0 -> small mixed weights
-  std::vector<uint8_t> fc3_experts_weights;                                                  // Empty for SwiGLU (gate weights concatenated with FC1)
+  std::vector<uint8_t> fc3_experts_weights;                                                  // Empty for SwiGLU (gate+value weights concatenated in FC1)
 
-  // Scales: for SwiGLU, FC1 has 2*inter_size outputs (linear + gate)
+  // Scales: for SwiGLU, FC1 has 2*inter_size outputs (gate + value in interleaved format)
+  // This matches the C++ implementation where SwiGLU always uses interleaved format
   std::vector<float> fc1_scales(num_experts * inter_size * 2, 0.05f);  // Small scale for reasonable outputs
   std::vector<float> fc2_scales(num_experts * hidden_size, 0.05f);
   std::vector<float> fc3_scales;
@@ -1537,14 +1578,14 @@ TEST(MoETest, QMoETest_CPU_SwiGLU_Int4) {
 
   OpTester cpu_tester("QMoE", 1, onnxruntime::kMSDomain);
   cpu_tester.AddAttribute<int64_t>("k", 2);
-  cpu_tester.AddAttribute<std::string>("activation_type", "swiglu");  // Test SwiGLU activation
+  cpu_tester.AddAttribute<std::string>("activation_type", "swiglu");  // Test SwiGLU activation (always using interleaved format)
   cpu_tester.AddAttribute<int64_t>("normalize_routing_weights", 1);
   cpu_tester.AddAttribute<int64_t>("expert_weight_bits", 4);
 
   std::vector<int64_t> input_dims = {num_rows, hidden_size};
   std::vector<int64_t> router_probs_dims = {num_rows, num_experts};
-  std::vector<int64_t> fc1_experts_weights_dims = {num_experts, hidden_size, inter_size};  // 4-bit SwiGLU: stored as hidden x inter, but contains 2*inter data
-  std::vector<int64_t> fc2_experts_weights_dims = {num_experts, inter_size, hidden_size / 2};
+  std::vector<int64_t> fc1_experts_weights_dims = {num_experts, 2 * inter_size, hidden_size / 2};
+  std::vector<int64_t> fc2_experts_weights_dims = {num_experts, hidden_size, inter_size / 2};
   std::vector<int64_t> fc1_scales_dims = {num_experts, inter_size * 2};  // 2x for SwiGLU (linear + gate)
   std::vector<int64_t> fc2_scales_dims = {num_experts, hidden_size};
   std::vector<int64_t> output_dims = {num_rows, hidden_size};
@@ -1557,11 +1598,11 @@ TEST(MoETest, QMoETest_CPU_SwiGLU_Int4) {
   cpu_tester.AddInput<uint8_t>("fc2_experts_weights", fc2_experts_weights_dims, fc2_experts_weights);
   cpu_tester.AddInput<float>("fc2_scales", fc2_scales_dims, fc2_scales);
   cpu_tester.AddOptionalInputEdge<MLFloat16>();  // fc2_experts_bias
-  cpu_tester.AddOptionalInputEdge<uint8_t>();    // fc3_experts_weights (empty for SwiGLU)
+  cpu_tester.AddOptionalInputEdge<uint8_t>();    // fc3_experts_weights (empty for SwiGLU since gate+value are interleaved in FC1)
   cpu_tester.AddOptionalInputEdge<float>();      // fc3_scales
   cpu_tester.AddOptionalInputEdge<MLFloat16>();  // fc3_experts_bias
   cpu_tester.AddOutput<MLFloat16>("output", output_dims, ToFloat16(output));
-  cpu_tester.SetOutputTolerance(0.02f);  // Higher tolerance for SwiGLU nonlinearity
+  cpu_tester.SetOutputTolerance(0.02f);  // Higher tolerance for SwiGLU nonlinearity with interleaved format
 
   std::vector<std::unique_ptr<IExecutionProvider>> cpu_execution_providers;
   cpu_execution_providers.push_back(DefaultCpuExecutionProvider());
@@ -1570,6 +1611,8 @@ TEST(MoETest, QMoETest_CPU_SwiGLU_Int4) {
 
 TEST(MoETest, QMoETest_CPU_SwiGLU_Int8) {
   // Test CPU implementation with 8-bit quantization and SwiGLU activation
+  // SwiGLU activation ALWAYS uses interleaved format regardless of bit width (4-bit or 8-bit)
+  // Weights are stored in column-major format
   int num_rows = 1;
   int num_experts = 2;
   int hidden_size = 8;
@@ -1578,16 +1621,20 @@ TEST(MoETest, QMoETest_CPU_SwiGLU_Int8) {
   const std::vector<float> input = {0.2f, -0.3f, 0.4f, -0.5f, 0.6f, -0.7f, 0.8f, -0.9f};
   const std::vector<float> router_probs = {0.0f, 0.0f};
 
-  // For SwiGLU with 8-bit symmetric quantization: FC1 weights are 2x inter_size (concatenated linear + gate weights)
-  const int fc1_weight_size_per_expert = hidden_size * inter_size * 2;  // For 8-bit SwiGLU
-  const int fc2_weight_size_per_expert = inter_size * hidden_size;      // For 8-bit FC2
+  // For SwiGLU with 8-bit symmetric quantization and column-major weights:
+  // FC1 weights are 2x inter_size (concatenated gate + value weights in interleaved format)
+  const int fc1_weight_size_per_expert = hidden_size * inter_size * 2;  // For 8-bit SwiGLU with column-major storage
+  const int fc2_weight_size_per_expert = inter_size * hidden_size;      // For 8-bit FC2 with column-major storage
 
   // Generate test weights at zero (for symmetric quantization) to produce zero output
-  std::vector<uint8_t> fc1_experts_weights(num_experts * fc1_weight_size_per_expert, 0);  // Zero in symmetric quantization
-  std::vector<uint8_t> fc2_experts_weights(num_experts * fc2_weight_size_per_expert, 0);  // Zero in symmetric quantization
-  std::vector<uint8_t> fc3_experts_weights;                                               // Empty for SwiGLU
+  // For 8-bit symmetric quantization, range is [-128, 127] stored as uint8 values [0, 255]
+  // 128 is the zero point for 8-bit symmetric quantization (maps to 0)
+  std::vector<uint8_t> fc1_experts_weights(num_experts * fc1_weight_size_per_expert, 128);  // 128 is zero in 8-bit symmetric quantization
+  std::vector<uint8_t> fc2_experts_weights(num_experts * fc2_weight_size_per_expert, 128);  // 128 is zero in 8-bit symmetric quantization
+  std::vector<uint8_t> fc3_experts_weights;                                                 // Empty for SwiGLU (gate+value always interleaved in FC1)
 
-  // Scales: for SwiGLU, FC1 has 2*inter_size outputs
+  // Scales: for SwiGLU, FC1 has 2*inter_size outputs (gate + value in interleaved format)
+  // This matches the C++ implementation where SwiGLU always uses interleaved format
   std::vector<float> fc1_scales(num_experts * inter_size * 2, 0.1f);
   std::vector<float> fc2_scales(num_experts * hidden_size, 0.1f);
   std::vector<float> fc3_scales;
@@ -1596,14 +1643,14 @@ TEST(MoETest, QMoETest_CPU_SwiGLU_Int8) {
 
   OpTester cpu_tester("QMoE", 1, onnxruntime::kMSDomain);
   cpu_tester.AddAttribute<int64_t>("k", 2);
-  cpu_tester.AddAttribute<std::string>("activation_type", "swiglu");  // Test SwiGLU activation
+  cpu_tester.AddAttribute<std::string>("activation_type", "swiglu");  // Test SwiGLU activation (always using interleaved format)
   cpu_tester.AddAttribute<int64_t>("normalize_routing_weights", 1);
   cpu_tester.AddAttribute<int64_t>("expert_weight_bits", 8);
 
   std::vector<int64_t> input_dims = {num_rows, hidden_size};
   std::vector<int64_t> router_probs_dims = {num_rows, num_experts};
-  std::vector<int64_t> fc1_experts_weights_dims = {num_experts, hidden_size, inter_size * 2};  // 8-bit SwiGLU: explicit 2x
-  std::vector<int64_t> fc2_experts_weights_dims = {num_experts, inter_size, hidden_size};
+  std::vector<int64_t> fc1_experts_weights_dims = {num_experts, inter_size * 2, hidden_size};  // 8-bit SwiGLU: explicit 2x
+  std::vector<int64_t> fc2_experts_weights_dims = {num_experts, hidden_size, inter_size};
   std::vector<int64_t> fc1_scales_dims = {num_experts, inter_size * 2};  // 2x for SwiGLU
   std::vector<int64_t> fc2_scales_dims = {num_experts, hidden_size};
   std::vector<int64_t> output_dims = {num_rows, hidden_size};
@@ -1616,11 +1663,11 @@ TEST(MoETest, QMoETest_CPU_SwiGLU_Int8) {
   cpu_tester.AddInput<uint8_t>("fc2_experts_weights", fc2_experts_weights_dims, fc2_experts_weights);
   cpu_tester.AddInput<float>("fc2_scales", fc2_scales_dims, fc2_scales);
   cpu_tester.AddOptionalInputEdge<MLFloat16>();  // fc2_experts_bias
-  cpu_tester.AddOptionalInputEdge<uint8_t>();    // fc3_experts_weights
+  cpu_tester.AddOptionalInputEdge<uint8_t>();    // fc3_experts_weights (empty for SwiGLU since gate+value are interleaved in FC1)
   cpu_tester.AddOptionalInputEdge<float>();      // fc3_scales
   cpu_tester.AddOptionalInputEdge<MLFloat16>();  // fc3_experts_bias
   cpu_tester.AddOutput<MLFloat16>("output", output_dims, ToFloat16(output));
-  cpu_tester.SetOutputTolerance(0.02f);
+  cpu_tester.SetOutputTolerance(0.02f);  // Higher tolerance for SwiGLU nonlinearity with interleaved format
 
   std::vector<std::unique_ptr<IExecutionProvider>> cpu_execution_providers;
   cpu_execution_providers.push_back(DefaultCpuExecutionProvider());
@@ -1660,7 +1707,7 @@ TEST(MoETest, QMoETest_CPU_Float32) {
 
   std::vector<int64_t> input_dims = {num_rows, hidden_size};
   std::vector<int64_t> router_probs_dims = {num_rows, num_experts};
-  std::vector<int64_t> fc1_experts_weights_dims = {num_experts, hidden_size, inter_size};
+  std::vector<int64_t> fc1_experts_weights_dims = {num_experts, hidden_size, inter_size};  // legacy shape
   std::vector<int64_t> fc2_experts_weights_dims = {num_experts, inter_size, hidden_size};
   std::vector<int64_t> fc1_scales_dims = {num_experts, inter_size};
   std::vector<int64_t> fc2_scales_dims = {num_experts, hidden_size};
