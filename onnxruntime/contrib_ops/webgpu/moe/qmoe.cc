@@ -78,17 +78,23 @@ Status QMoE::ComputeInternal(ComputeContext& context) const {
     return ORT_MAKE_STATUS(ONNXRUNTIME, NOT_IMPLEMENTED,
                            "FC3 gating is not yet implemented for non-SwiGLU activations on CPU.");
   }
+  const int64_t act_multiplier = is_swiglu ? 2 : 1;
+  const int64_t fc1_output_size = is_swiglu ? 2 * moe_params.inter_size : moe_params.inter_size;
+  const int64_t total_output_size = moe_params.num_rows * moe_params.hidden_size;
+
+
+  /*
+  export_ids = Gate(input, router_probs)
+  for (expert_id in export_ids):
+    fc1_output = FC1(input, expert_id)
+    fc1_output = Activation(fc1_output)
+    output = FC2(fc1_output, expert_id)
+  */
 
   auto* output_tensor = context.Output(0, input_shape);
   int output_size = static_cast<int>(input_shape.Size());
 
-  // run each expert
-  Tensor metadata = context.CreateGPUTensor(DataTypeImpl::GetType<float>(), metadata_shape);
-    const int64_t fc1_output_size = is_swiglu ? 2 * moe_params.inter_size : moe_params.inter_size;
-    auto dequant_fc1_weights = IAllocator::MakeUniquePtr<float>(allocator,
-                                                                static_cast<size_t>(moe_params.num_experts * moe_params.hidden_size * fc1_output_size));
-    auto dequant_fc2_weights = IAllocator::MakeUniquePtr<float>(allocator,
-                                                                static_cast<size_t>(moe_params.num_experts * moe_params.inter_size * moe_params.hidden_size));
+
 
   QMoEProgram program{input_shape, activation_type_};
 

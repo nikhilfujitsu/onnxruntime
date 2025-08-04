@@ -41,6 +41,8 @@ class QMoE final : public MoE {
 
  private:
   int64_t expert_weight_bits_;
+  float activation_alpha_;
+  float activation_beta_;
 };
 
 }  // namespace webgpu

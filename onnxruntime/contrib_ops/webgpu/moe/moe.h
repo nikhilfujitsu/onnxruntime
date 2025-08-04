@@ -54,6 +54,8 @@ protected:
   bool normalize_routing_weights_;
   bool use_sparse_mixer_;
   MoEActivationType activation_type_;
+  int swiglu_fusion_;
+  int swiglu_limit_;
 };
 
 }  // namespace webgpu
