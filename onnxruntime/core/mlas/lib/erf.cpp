@@ -22,6 +22,7 @@ Abstract:
 --*/
 
 #include "mlasi.h"
+#include "softmax_kernel_neon.h"
 //
 // Bundles the constants for use by kernels written in assembly.
 //
@@ -265,4 +266,139 @@ Return Value:
 #else
     MlasErfKernel(Input, Output, N);
 #endif
+}
+
+// Helpers to safely convert between float and FP16-bit representation
+static float fp16_to_float(uint16_t h) {
+    __fp16 tmp;
+    memcpy(&tmp, &h, sizeof(h));
+    return (float)tmp;
+}
+static uint16_t float_to_fp16(float f) {
+    __fp16 tmp = (__fp16)f;
+    uint16_t h;
+    memcpy(&h, &tmp, sizeof(h));
+    return h;
+}
+#include <arm_neon.h>
+#include <stdint.h>
+using _mlas_fp16_ = uint16_t;
+typedef uint16_t _mlas_fp16_;
+static inline float16x8_t load_fp16(const _mlas_fp16_* ptr) {
+    uint16x8_t u = vld1q_u16(ptr);
+    return vreinterpretq_f16_u16(u);
+}
+static inline void store_fp16(_mlas_fp16_* ptr, float16x8_t val) {
+    uint16x8_t u = vreinterpretq_u16_f16(val);
+    vst1q_u16(ptr, u);
+}
+static inline float16x8_t
+exp_neg_rational_approx_f16(float16x8_t x) {
+    // Clamp x to max 6.0
+    float16x8_t max_x = vdupq_n_f16(6.0f);
+    x = vminq_f16(x, max_x);
+    const float16_t c0 = 1.330f;
+    const float16_t c1 = -0.390f;
+    const float16_t c2 = 0.0288f;
+    const float16_t d0 = 1.338f;
+    const float16_t d1 = 0.848f;
+    const float16_t d2 = 0.467f;
+    float16x8_t c0v = vdupq_n_f16(c0);
+    float16x8_t c1v = vdupq_n_f16(c1);
+    float16x8_t c2v = vdupq_n_f16(c2);
+    float16x8_t d0v = vdupq_n_f16(d0);
+    float16x8_t d1v = vdupq_n_f16(d1);
+    float16x8_t d2v = vdupq_n_f16(d2);
+    float16x8_t x2 = vmulq_f16(x, x);
+    // numerator = c0 + c1*x + c2*x²
+    float16x8_t num = vaddq_f16(c0v, vmulq_f16(c1v, x));
+    num = vaddq_f16(num, vmulq_f16(c2v, x2));
+    // denominator = d0 + d1*x + d2*x²
+    float16x8_t den = vaddq_f16(d0v, vmulq_f16(d1v, x));
+    den = vaddq_f16(den, vmulq_f16(d2v, x2));
+    // Reciprocal approximation (Newton-Raphson)
+    float16x8_t recip = vrecpeq_f16(den);
+    recip = vmulq_f16(recip, vrecpsq_f16(den, recip)); // 1st NR iteration
+    recip = vmulq_f16(recip, vrecpsq_f16(den, recip)); // 2nd NR iteration
+    float16x8_t result = vmulq_f16(num, recip);
+    return result;
+}
+void MlasNeonErfKernelFp16(const _mlas_fp16_* Input, _mlas_fp16_* Output, size_t N)
+{
+    
+    const float16_t p = 0.328f;
+    const float16_t a1 = 0.2505f;
+    const float16_t a2 = -0.2881f;
+    const float16_t a3 = 1.4102f;
+    const float16_t a4 = -1.423f;
+    const float16_t a5 = 1.0547f;
+    float16x8_t vp = vdupq_n_f16(p);
+    float16x8_t va1 = vdupq_n_f16(a1);
+    float16x8_t va2 = vdupq_n_f16(a2);
+    float16x8_t va3 = vdupq_n_f16(a3);
+    float16x8_t va4 = vdupq_n_f16(a4);
+    float16x8_t va5 = vdupq_n_f16(a5);
+    float16x8_t vone = vdupq_n_f16(1.0f);
+    float16x8_t vneg_one = vdupq_n_f16(-1.0f);
+    float16x8_t vzero = vdupq_n_f16(0.0f);
+    float16x8_t vth = vdupq_n_f16(4.0f);
+    size_t i = 0;
+    for (; i + 8 <= N; i += 8) {
+        float16x8_t x = load_fp16(&Input[i]);
+        // sign mask: if x < 0, sign = -1 else 1
+        uint16x8_t neg_mask = vcltq_f16(x, vzero);
+        float16x8_t sign = vbslq_f16(neg_mask, vneg_one, vone);
+        // absx = |x|
+        float16x8_t absx = vabsq_f16(x);
+        // use_mask = absx < 4.0 (compute approximation only if true)
+        uint16x8_t use_mask = vcltq_f16(absx, vth);
+        // Clamp absx for stability
+        float16x8_t absx_clamped = vminq_f16(absx, vth);
+        // Compute t = 1 / (1 + p * x)
+        float16x8_t denom = vaddq_f16(vone, vmulq_f16(vp, absx_clamped));
+        float16x8_t t = vrecpeq_f16(denom);
+        t = vmulq_f16(t, vrecpsq_f16(denom, t));
+        t = vmulq_f16(t, vrecpsq_f16(denom, t));  // 2 Newton-Raphson
+        // Polynomial P(t) = a1 t + a2 t² + a3 t³ + a4 t⁴ + a5 t⁵
+        float16x8_t t2 = vmulq_f16(t, t);
+        float16x8_t t3 = vmulq_f16(t2, t);
+        float16x8_t t4 = vmulq_f16(t3, t);
+        float16x8_t t5 = vmulq_f16(t4, t);
+        float16x8_t poly = vmulq_f16(va1, t);
+        poly = vaddq_f16(poly, vmulq_f16(va2, t2));
+        poly = vaddq_f16(poly, vmulq_f16(va3, t3));
+        poly = vaddq_f16(poly, vmulq_f16(va4, t4));
+        poly = vaddq_f16(poly, vmulq_f16(va5, t5));
+        // Compute exp(-x²) with rational approx
+        float16x8_t x2 = vmulq_f16(absx_clamped, absx_clamped);
+        float16x8_t exp_neg_x2 = exp_neg_rational_approx_f16(x2);
+        // erf(x) ≈ sign * (1 - P(t) * exp(-x²))
+        float16x8_t poly_mul_exp = vmulq_f16(poly, exp_neg_x2);
+        float16x8_t one_minus_term = vsubq_f16(vone, poly_mul_exp);
+        float16x8_t erf_approx = vmulq_f16(sign, one_minus_term);
+        // Clamp to [-1, 1]
+        erf_approx = vminq_f16(erf_approx, vone);
+        erf_approx = vmaxq_f16(erf_approx, vneg_one);
+        // Select approximation or ±1 based on mask
+        float16x8_t result = vbslq_f16(use_mask, erf_approx, sign);
+        // Store FP16 result
+        store_fp16(&Output[i], result);
+    }
+    // Tail handling (scalar fallback)
+   for (; i < N; i++) {
+    float x = fp16_to_float(Input[i]);
+    float sign = (x < 0) ? -1.0f : 1.0f;
+    float absx = fabsf(x);
+    if (absx > 4.0f) {
+        Output[i] = float_to_fp16(sign);
+        continue;
+    }
+    float t = 1.0f / (1.0f + p * absx);
+    float poly = a1 * t + a2 * t * t + a3 * t * t * t + a4 * t * t * t * t + a5 * t * t * t * t * t;
+    float exp_neg_x2 = expf(-absx * absx);
+    float erf_approx = sign * (1.0f - poly * exp_neg_x2);
+    if (erf_approx > 1.0f) erf_approx = 1.0f;
+    if (erf_approx < -1.0f) erf_approx = -1.0f;
+    Output[i] = float_to_fp16(erf_approx);
+}
 }

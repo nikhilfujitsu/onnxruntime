@@ -10,7 +10,7 @@
 #endif
 
 using namespace onnxruntime::common;
-
+using _mlas_fp16_ = uint16_t;
 namespace onnxruntime {
 
 #define REGISTER_VERSIONED_UNARY_ELEMENTWISE_KERNEL(op, since_version, end_version) \
@@ -53,7 +53,8 @@ REGISTER_UNARY_ELEMENTWISE_TYPED_KERNEL(Relu, 14, MLFloat16);
 REGISTER_VERSIONED_UNARY_ELEMENTWISE_TYPED_KERNEL(LeakyRelu, 6, 15, MLFloat16);
 REGISTER_UNARY_ELEMENTWISE_TYPED_KERNEL(LeakyRelu, 16, MLFloat16);
 #endif  // MLAS_F16VEC_INTRINSICS_SUPPORTED
-
+REGISTER_VERSIONED_UNARY_ELEMENTWISE_TYPED_KERNEL(Tanh, 6, 12, MLFloat16);
+REGISTER_UNARY_ELEMENTWISE_TYPED_KERNEL(Tanh, 13, MLFloat16);
 REGISTER_VERSIONED_UNARY_ELEMENTWISE_KERNEL(Selu, 6, 21);
 REGISTER_UNARY_ELEMENTWISE_KERNEL(Selu, 22);
 REGISTER_VERSIONED_UNARY_ELEMENTWISE_TYPED_KERNEL(Sigmoid, 6, 12, float);
@@ -110,6 +111,25 @@ Status ElementWiseRangedTransform<T>::Create(const std::string& type, const Node
 
 template Status ElementWiseRangedTransform<float>::Create(const std::string& type, const NodeAttributes& attributes,
                                                           std::unique_ptr<ElementWiseRangedTransform<float>>& out);
+#ifdef MLAS_F16VEC_INTRINSICS_SUPPORTED
+  template <>
+Status ElementWiseRangedTransform<MLFloat16>::Create(const std::string& type,
+                                                     const NodeAttributes& attributes,
+                                                     std::unique_ptr<ElementWiseRangedTransform<MLFloat16>>& out) {
+  if (type == "Tanh") {
+    auto p = std::make_unique<functors::Tanh<MLFloat16>>();
+    ORT_RETURN_IF_ERROR(p->Init(attributes));
+    out = std::move(p);
+    return Status::OK();
+  }
+  return Status(ONNXRUNTIME, FAIL, "Unsupported kernel type for MLFloat16: " + type);
+}
+// Explicit template instantiation (optional but recommended)
+template Status ElementWiseRangedTransform<MLFloat16>::Create(
+    const std::string& type,
+    const NodeAttributes& attributes,
+    std::unique_ptr<ElementWiseRangedTransform<MLFloat16>>& out);   
+   #endif  
 }  // namespace functors
 
 namespace functors {
@@ -126,6 +146,16 @@ void Tanh<float>::operator()(std::ptrdiff_t first, std::ptrdiff_t last) const {
   float* output_ptr = output + first;
   MlasComputeTanh(input + first, output_ptr, static_cast<size_t>(len));
 }
+
+#ifdef MLAS_F16VEC_INTRINSICS_SUPPORTED
+template <>
+void Tanh<MLFloat16>::operator()(std::ptrdiff_t first, std::ptrdiff_t last) const {
+  ptrdiff_t len = last - first;
+  MLFloat16* output_ptr = output + first;
+  MlasComputeTanh<MLFloat16>(input + first,output_ptr, static_cast<size_t>(len) );
+}
+#endif
+
 }  // namespace functors
 
 }  // namespace onnxruntime

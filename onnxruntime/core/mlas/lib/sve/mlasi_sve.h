@@ -41,6 +41,14 @@ MlasSveComputeExpVector(
     MLAS_SVFLOAT32 Vector
 );
 
+using _mlas_fp16_ = uint16_t;
+void
+MLASCALL
+MlasSveErfKernelFp16(
+    const _mlas_fp16_* Input, _mlas_fp16_* Output, size_t N
+    );
+void MLASCALL MlasTanhKernelFp16_SVE(const MLAS_FP16* Input, MLAS_FP16* Output, size_t N);
+
 void
 MLASCALL
 MlasSveComputeExpF32Kernel(

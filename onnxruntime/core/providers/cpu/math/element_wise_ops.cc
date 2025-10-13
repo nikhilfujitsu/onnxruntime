@@ -530,6 +530,7 @@ REG_ELEMENTWISE_TYPED_KERNEL(BitwiseXor, 18, uint32_t, BitwiseXor);
 REG_ELEMENTWISE_TYPED_KERNEL(BitwiseXor, 18, uint64_t, BitwiseXor);
 
 REG_ELEMENTWISE_VERSIONED_TYPED_KERNEL(Erf, 9, 12, float, Erf);
+REG_ELEMENTWISE_VERSIONED_TYPED_KERNEL(Erf, 9, 12, MLFloat16, Erf);
 // Supposed to add BFloat16 but we are not supporting now, however, separate registration
 REG_ELEMENTWISE_TYPED_KERNEL(Erf, 13, float, Erf);
 REG_ELEMENTWISE_TYPED_KERNEL(Erf, 13, MLFloat16, Erf);
@@ -2011,6 +2012,47 @@ Status Erf<float>::Compute(OpKernelContext* context) const {
   return Status::OK();
 }
 
+// template <>
+// Status Erf<MLFloat16>::Compute(OpKernelContext* context) const {
+//   const auto* X = context->Input<Tensor>(0);
+//   const auto& x_shape = X->Shape();
+//   auto* Y = context->Output(0, x_shape);
+//   const auto* input_data = X->Data<MLFloat16>();
+//   auto* output_data = Y->MutableData<MLFloat16>();
+//   concurrency::ThreadPool* tp = context->GetOperatorThreadPool();
+//   int64_t elem_count = X->Shape().Size();
+//   constexpr int64_t length_per_task = 4096;
+//   int64_t task_count = (elem_count + length_per_task - 1) / length_per_task;
+
+//   const auto narrow_task_count = onnxruntime::narrow<std::ptrdiff_t>(task_count);
+
+//   // get allocator for temporary buffers
+//   AllocatorPtr alloc;
+//   ORT_RETURN_IF_ERROR(context->GetTempSpaceAllocator(&alloc));
+
+//   concurrency::ThreadPool::TryBatchParallelFor(
+//       tp, narrow_task_count,
+//       [&](ptrdiff_t task_idx) {
+//         const auto start = task_idx * length_per_task;
+//         const int64_t count = std::min(length_per_task, elem_count - start);
+//         const auto narrow_count = onnxruntime::narrow<std::ptrdiff_t>(count);
+
+//         const MLFloat16* p_input = input_data + start;
+//         MLFloat16* p_output = output_data + start;
+
+//         // allocate temp buffers using ORT allocator
+//         IAllocatorUniquePtr<float> input_fp32 = IAllocator::MakeUniquePtr<float>(alloc, narrow_count);
+//         IAllocatorUniquePtr<float> output_fp32 = IAllocator::MakeUniquePtr<float>(alloc, narrow_count);
+
+//         // convert, compute, convert back
+//         MlasConvertHalfToFloatBuffer(p_input, input_fp32.get(), narrow_count);
+//         MlasComputeErf(input_fp32.get(), output_fp32.get(), narrow_count);
+//         MlasConvertFloatToHalfBuffer(output_fp32.get(), p_output, narrow_count);
+//       },
+//       0);
+
+//   return Status::OK();
+// }
 template <>
 Status Erf<MLFloat16>::Compute(OpKernelContext* context) const {
   const auto* X = context->Input<Tensor>(0);
@@ -2022,37 +2064,22 @@ Status Erf<MLFloat16>::Compute(OpKernelContext* context) const {
   int64_t elem_count = X->Shape().Size();
   constexpr int64_t length_per_task = 4096;
   int64_t task_count = (elem_count + length_per_task - 1) / length_per_task;
-
-  const auto narrow_task_count = onnxruntime::narrow<std::ptrdiff_t>(task_count);
-
-  // get allocator for temporary buffers
-  AllocatorPtr alloc;
-  ORT_RETURN_IF_ERROR(context->GetTempSpaceAllocator(&alloc));
-
   concurrency::ThreadPool::TryBatchParallelFor(
-      tp, narrow_task_count,
-      [&](ptrdiff_t task_idx) {
-        const auto start = task_idx * length_per_task;
-        const int64_t count = std::min(length_per_task, elem_count - start);
-        const auto narrow_count = onnxruntime::narrow<std::ptrdiff_t>(count);
-
-        const MLFloat16* p_input = input_data + start;
-        MLFloat16* p_output = output_data + start;
-
-        // allocate temp buffers using ORT allocator
-        IAllocatorUniquePtr<float> input_fp32 = IAllocator::MakeUniquePtr<float>(alloc, narrow_count);
-        IAllocatorUniquePtr<float> output_fp32 = IAllocator::MakeUniquePtr<float>(alloc, narrow_count);
-
-        // convert, compute, convert back
-        MlasConvertHalfToFloatBuffer(p_input, input_fp32.get(), narrow_count);
-        MlasComputeErf(input_fp32.get(), output_fp32.get(), narrow_count);
-        MlasConvertFloatToHalfBuffer(output_fp32.get(), p_output, narrow_count);
+       tp, narrow<std::ptrdiff_t>(task_count),
+       [&](ptrdiff_t task_idx) {
+      const auto start = task_idx * length_per_task;
+      const MLFloat16* p_input = input_data + start;
+      MLFloat16* p_output = output_data + start;
+      int64_t count = std::min(length_per_task, elem_count - start);
+       MlasNeonErfKernelFp16(reinterpret_cast<const _mlas_fp16_*>(p_input), reinterpret_cast< _mlas_fp16_*>(p_output),narrow<ptrdiff_t>(count));
+       //MlasSveErfKernelFp16( reinterpret_cast<const _mlas_fp16_*>(p_input), reinterpret_cast< _mlas_fp16_*>(p_output),narrow<ptrdiff_t>(count));
+        // Compute ERF in float32
+        //MlasComputeErf(input_fp32.data(), output_fp32.data(), narrow<ptrdiff_t>(count));
+       
       },
       0);
-
-  return Status::OK();
-}
-
+ return Status::OK();
+    }
 class Mod final : public OpKernel {
  public:
   Mod(const OpKernelInfo& info) : OpKernel(info) {
